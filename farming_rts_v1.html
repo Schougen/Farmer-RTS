@@ -732,19 +732,34 @@ function listTilesWhere(pred){ const out=[]; for(let y=0;y<GRID_H;y++){ for(let 
 function assignUniqueTasks(units, tasks, perUnitLimit, actionType){
   if(!units.length || !tasks.length || perUnitLimit<=0) return;
   const remaining = tasks.slice();
-  for(const unit of units){
-    if(!remaining.length) break;
+  const assignedCount = new Map(units.map(u=>[u.id, 0]));
+
+  // Round-robin through units, always giving the next task to the unit with
+  // the smallest workload so we spread the queue evenly.
+  while(remaining.length){
+    const eligible = units.filter(u=> (assignedCount.get(u.id) ?? 0) < perUnitLimit);
+    if(!eligible.length) break;
+
+    eligible.sort((a,b)=>{
+      const diff = (assignedCount.get(a.id) ?? 0) - (assignedCount.get(b.id) ?? 0);
+      if(diff!==0) return diff;
+      const nearestA = nearestFirst(a, remaining)[0];
+      const nearestB = nearestFirst(b, remaining)[0];
+      const distA = nearestA ? Math.abs(a.x-nearestA.x)+Math.abs(a.y-nearestA.y) : Infinity;
+      const distB = nearestB ? Math.abs(b.x-nearestB.x)+Math.abs(b.y-nearestB.y) : Infinity;
+      return distA - distB;
+    });
+
+    const unit = eligible[0];
     const ordered = nearestFirst(unit, remaining);
-    let given = 0;
-    for(const pt of ordered){
-      if(given>=perUnitLimit) break;
-      const idx = remaining.findIndex(p=>p.x===pt.x && p.y===pt.y);
-      if(idx===-1) continue;
-      remaining.splice(idx,1);
-      unit.commands.push({tx:pt.x, ty:pt.y, type:actionType});
-      given++;
-      if(!remaining.length) break;
-    }
+    const target = ordered[0];
+    if(!target) break;
+    const idx = remaining.findIndex(p=>p.x===target.x && p.y===target.y);
+    if(idx===-1) continue;
+
+    remaining.splice(idx,1);
+    unit.commands.push({tx:target.x, ty:target.y, type:actionType});
+    assignedCount.set(unit.id, (assignedCount.get(unit.id) ?? 0) + 1);
   }
 }
 
