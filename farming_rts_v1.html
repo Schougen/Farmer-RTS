@@ -72,9 +72,11 @@
         <select id="planScope">
           <option value="all">All jobs</option>
           <option value="plow">Plow only</option>
+          <option value="stone">Stone picking only</option>
           <option value="seed">Seed only</option>
           <option value="spray">Spray only</option>
           <option value="harvest">Harvest only</option>
+          <option value="snow">Snow clearing only</option>
         </select>
       </label>
     </div>
@@ -158,6 +160,9 @@ const TileType = { GRASS:0, FIELD:1, ROAD:2, SILO:3, HOUSE:4 };
 const CROP_STAGE = { NONE:-1, BARE:0, PLOWED:1, GROWING:2, READY:3 };
 
 const ACTION = { MOVE:'move', FIELD:'field', PLOW:'plow', SEED:'seed', SPRAY:'spray', HARVEST:'harvest', STONE:'stone', SNOW:'snow', AUTO:'auto' };
+
+const IDLE_TO_ROAD_MINUTES = 3 * 60;      // After 3 in-game hours, seek a road spot
+const IDLE_TO_SHELTER_MINUTES = 6 * 60;   // After 6 in-game hours, seek shelter
 
 // ===== Seasons =====
 const SEASONS = ['Spring','Summer','Autumn','Winter'];
@@ -325,7 +330,9 @@ function createUnit(type,x,y,opts={}){
     workY:null,
     state:'idle',
     isOwner: !!opts.isOwner,
-    alwaysActive: !!opts.alwaysActive
+    alwaysActive: !!opts.alwaysActive,
+    idleMinutes:0,
+    restTarget:null
   };
 }
 function initUnits(){
@@ -373,8 +380,17 @@ function updateGameClock(dt, opts={}){
 }
 
 function onSeasonChanged(prev, now){
-  // When Winter starts, blanket snow over roads & fields to enable snowplowing.
-  if(now===3){ for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++) if(tiles[y][x]===TileType.ROAD || tiles[y][x]===TileType.FIELD) snow[y][x]=true; }
+  // When Winter starts, blanket snow over roads, fields & grass (but not buildings).
+  if(now===3){
+    for(let y=0;y<GRID_H;y++){
+      for(let x=0;x<GRID_W;x++){
+        const t = tiles[y][x];
+        if(t===TileType.ROAD || t===TileType.FIELD || t===TileType.GRASS){
+          snow[y][x] = true;
+        }
+      }
+    }
+  }
   // Optional: melt on Spring
   if(prev===3 && now===0){ for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++) snow[y][x]=false; }
 }
@@ -403,7 +419,57 @@ function growthProgress(x,y){ return getCell(crops,x,y,CROP_STAGE.NONE)===CROP_S
 function readyProgress(x,y){ return getCell(crops,x,y,CROP_STAGE.NONE)===CROP_STAGE.READY ? Math.max(0, Math.min(1, getCell(readyTimers,x,y,0) / READY_WINDOW)) : 0; }
 
 /* ===== Commands ===== */
-function stepTowards(u, tx, ty){ if(u.x<tx) u.x++; else if(u.x>tx) u.x--; else if(u.y<ty) u.y++; else if(u.y>ty) u.y--; }
+function isOccupied(x,y, ignoreUnit){
+  for(const other of units){
+    if(!other || other===ignoreUnit) continue;
+    if(other.x===x && other.y===y) return true;
+  }
+  return false;
+}
+
+function stepOptions(u, tx, ty){
+  const options = [];
+  if(u.x<tx) options.push({x:u.x+1, y:u.y});
+  else if(u.x>tx) options.push({x:u.x-1, y:u.y});
+  if(u.y<ty) options.push({x:u.x, y:u.y+1});
+  else if(u.y>ty) options.push({x:u.x, y:u.y-1});
+  return options;
+}
+
+function tryStepTowards(u, tx, ty){
+  const options = stepOptions(u, tx, ty);
+  for(const opt of options){
+    if(!inBounds(opt.x, opt.y)) continue;
+    if(isOccupied(opt.x, opt.y, u)) continue;
+    u.x = opt.x; u.y = opt.y; return true;
+  }
+  return false;
+}
+
+function findNearestTileOfType(u, tileTypes, opts={}){
+  const allowOccupied = opts.allowOccupied ?? false;
+  let best = null;
+  let bestDist = Infinity;
+  for(let y=0;y<GRID_H;y++){
+    for(let x=0;x<GRID_W;x++){
+      if(!tileTypes.has(tiles[y][x])) continue;
+      if(!allowOccupied && isOccupied(x,y,u)){
+        if(!(u.x===x && u.y===y)) continue;
+      }
+      const dist = Math.abs(u.x-x) + Math.abs(u.y-y);
+      if(dist < bestDist){ bestDist = dist; best = {x,y}; }
+    }
+  }
+  return best;
+}
+
+function findNearestRoad(u){
+  return findNearestTileOfType(u, new Set([TileType.ROAD]));
+}
+
+function findNearestShelter(u){
+  return findNearestTileOfType(u, new Set([TileType.HOUSE, TileType.SILO]));
+}
 
 function getTile(x,y){ return inBounds(x,y) ? tiles[y][x] : null; }
 function getStage(x,y){ return inBounds(x,y) ? crops[y][x] : CROP_STAGE.NONE; }
@@ -415,7 +481,12 @@ function autoPickActionForTile(unit, tx, ty){
   if(!inBounds(tx,ty)) return null;
   const t = getTile(tx,ty); const s = seasonFromMinutes(gameMinutes);
   if(unit.type===UnitType.TRACTOR){
-    if(s.seasonIndex===3){ if((t===TileType.ROAD||t===TileType.FIELD)&&getSnow(tx,ty)) return ACTION.SNOW; return null; }
+    if(s.seasonIndex===3){
+      if(getSnow(tx,ty)){
+        if(t===TileType.ROAD || t===TileType.FIELD || t===TileType.GRASS) return ACTION.SNOW;
+      }
+      return null;
+    }
     if(t===TileType.GRASS) return ACTION.FIELD;
     if(t!==TileType.FIELD) return null;
     const stage = getStage(tx,ty);
@@ -439,6 +510,8 @@ function tryStartWork(u, tx, ty, action){
   let chosen = action===ACTION.AUTO ? autoPickActionForTile(u, tx, ty) : action;
   if(!chosen) return false; if(!unitCanDo(u, chosen)) return false;
 
+  u.restTarget = null;
+
   // Field creation
   if(chosen===ACTION.FIELD){ if(tile!==TileType.GRASS) return false; if(money < FIELDIFY_COST) return false; u.action=ACTION.FIELD; u.actionTimer=FIELDIFY_TIME; u.workX=tx; u.workY=ty; u.state='working'; money-=FIELDIFY_COST; return true; }
 
@@ -446,7 +519,7 @@ function tryStartWork(u, tx, ty, action){
   if(chosen===ACTION.STONE){ if(tile!==TileType.FIELD) return false; const st=getStage(tx,ty); if(!(st===CROP_STAGE.BARE || st===CROP_STAGE.PLOWED)) return false; if(getStone(tx,ty)) return false; u.action=ACTION.STONE; u.actionTimer=STONE_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
 
   // Snow plow (Winter)
-  if(chosen===ACTION.SNOW){ const s=seasonFromMinutes(gameMinutes); if(s.seasonIndex!==3) return false; if(!(tile===TileType.ROAD||tile===TileType.FIELD)) return false; if(!getSnow(tx,ty)) return false; u.action=ACTION.SNOW; u.actionTimer=SNOW_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
+  if(chosen===ACTION.SNOW){ const s=seasonFromMinutes(gameMinutes); if(s.seasonIndex!==3) return false; if(!(tile===TileType.ROAD||tile===TileType.FIELD||tile===TileType.GRASS)) return false; if(!getSnow(tx,ty)) return false; u.action=ACTION.SNOW; u.actionTimer=SNOW_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
 
   // Farm actions need a field
   if(tile!==TileType.FIELD) return false;
@@ -459,6 +532,66 @@ function tryStartWork(u, tx, ty, action){
 
   u.action = chosen; u.actionTimer = dur; u.workX = tx; u.workY = ty; u.state='working';
   return true;
+}
+
+function enqueueCommand(u, cmd){
+  if(!cmd) return;
+  if(cmd.meta==='rest'){
+    u.restTarget = {x:cmd.tx, y:cmd.ty, kind:cmd.restKind || 'road'};
+  } else {
+    removeRestCommands(u);
+    u.restTarget = null;
+    u.idleMinutes = 0;
+  }
+  u.commands.push(cmd);
+}
+
+function removeRestCommands(u){
+  if(!u || !u.commands) return;
+  for(let i=u.commands.length-1;i>=0;i--){ if(u.commands[i].meta==='rest') u.commands.splice(i,1); }
+}
+
+function maybeSendToRest(u){
+  if(!u) return;
+  if(u.actionTimer>0) return;
+  if(u.commands.some(c=>c.meta!=='rest')) return;
+
+  const shelterDue = u.idleMinutes >= IDLE_TO_SHELTER_MINUTES;
+  const roadDue = u.idleMinutes >= IDLE_TO_ROAD_MINUTES;
+  if(!roadDue) return;
+
+  if(shelterDue){
+    const shelter = findNearestShelter(u);
+    if(shelter){
+      if(u.restTarget && u.restTarget.kind==='shelter'){
+        if(u.x===u.restTarget.x && u.y===u.restTarget.y) return;
+        if(u.commands.some(c=>c.meta==='rest' && c.restKind==='shelter')) return;
+      }
+      removeRestCommands(u);
+      if(u.x===shelter.x && u.y===shelter.y){
+        u.restTarget = {x:shelter.x, y:shelter.y, kind:'shelter'};
+      } else {
+        enqueueCommand(u, {tx:shelter.x, ty:shelter.y, type:ACTION.MOVE, meta:'rest', restKind:'shelter'});
+      }
+      return;
+    }
+  }
+
+  if(u.restTarget && (u.restTarget.kind==='road' || u.restTarget.kind==='shelter')) return;
+
+  const hereTile = getTile(u.x, u.y);
+  if(hereTile===TileType.ROAD){
+    u.restTarget = {x:u.x, y:u.y, kind:'road'};
+    return;
+  }
+  const road = findNearestRoad(u);
+  if(road){
+    if(u.x===road.x && u.y===road.y){
+      u.restTarget = {x:road.x, y:road.y, kind:'road'};
+    } else {
+      enqueueCommand(u, {tx:road.x, ty:road.y, type:ACTION.MOVE, meta:'rest', restKind:'road'});
+    }
+  }
 }
 
 function finishAction(u){
@@ -481,11 +614,72 @@ function finishAction(u){
 
 function updateUnits(dt){
   const simDt = dt*timeScale;
+  const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
+  const minuteDelta = simDt * minutesPerRealSecond;
   for(const u of units){
+    if(u.idleMinutes===undefined) u.idleMinutes=0;
+    if(u.restTarget===undefined) u.restTarget=null;
     const active = unitIsOnShift(u);
-    if(u.actionTimer>0){ if(active){ u.actionTimer -= simDt; if(u.actionTimer<=0) finishAction(u); } continue; }
-    if(u.commands.length>0){ const cmd=u.commands[0]; const {tx,ty,type}=cmd; if(u.x===tx && u.y===ty){ if(active) tryStartWork(u, tx, ty, type); u.commands.shift(); } else { if(active){ u.moveCooldown -= simDt; if(u.moveCooldown<=0){ stepTowards(u, tx, ty); u.moveCooldown = MOVE_DELAY; u.state='moving'; } } } }
-    else { if(u.state!=='idle') u.state='idle'; }
+
+    if(u.actionTimer>0){
+      if(active){
+        u.actionTimer -= simDt;
+        if(u.actionTimer<=0){
+          finishAction(u);
+          u.idleMinutes = 0;
+        }
+      }
+      continue;
+    }
+
+    const hasCommands = u.commands.length>0;
+    const hasNonRestCommands = hasCommands ? u.commands.some(c=>c.meta!=='rest') : false;
+    if(hasNonRestCommands) u.restTarget = null;
+
+    if(hasCommands){
+      const cmd = u.commands[0];
+      const {tx, ty, type} = cmd;
+      const canMove = active || cmd.meta==='rest';
+
+      if(u.x===tx && u.y===ty){
+        if(type===ACTION.MOVE){
+          u.commands.shift();
+          if(!u.commands.length && u.state!=='idle') u.state='idle';
+        } else {
+          if(active){
+            if(tryStartWork(u, tx, ty, type)){
+              u.commands.shift();
+              u.idleMinutes = 0;
+              continue;
+            }
+          }
+        }
+      } else if(canMove){
+        u.moveCooldown -= simDt;
+        if(u.moveCooldown<=0){
+          const moved = tryStepTowards(u, tx, ty);
+          if(moved){
+            u.moveCooldown = MOVE_DELAY;
+            u.state='moving';
+            if(cmd.meta!=='rest') u.idleMinutes = 0;
+          } else {
+            u.moveCooldown = MOVE_DELAY*0.5;
+            if(u.state!=='waiting') u.state='waiting';
+          }
+        }
+      }
+
+      if(hasNonRestCommands){
+        u.idleMinutes = 0;
+      } else {
+        u.idleMinutes += minuteDelta;
+        maybeSendToRest(u);
+      }
+    } else {
+      if(u.state!=='idle') u.state='idle';
+      u.idleMinutes += minuteDelta;
+      maybeSendToRest(u);
+    }
   }
 }
 
@@ -493,7 +687,15 @@ function updateUnits(dt){
 canvas.addEventListener('mousedown', (e)=>{
   const rect = canvas.getBoundingClientRect(); const mx = e.clientX - rect.left; const my = e.clientY - rect.top; const tx = Math.floor(mx / TILE_SIZE); const ty = Math.floor(my / TILE_SIZE);
   if(e.button===0){ let found=-1; for(let i=0;i<units.length;i++){ if(units[i].x===tx && units[i].y===ty){ found=i; break; } } if(found!==-1){ selectedUnit = found; } selectedTile = {x:tx, y:ty}; renderTileInfo(); }
-  else if(e.button===2){ if(selectedUnit>=0 && selectedUnit<units.length){ const u=units[selectedUnit]; const append = e.shiftKey; const type = currentMode; if(!append) u.commands.length=0; if(inBounds(tx,ty)) u.commands.push({tx,ty,type}); } }
+  else if(e.button===2){
+    if(selectedUnit>=0 && selectedUnit<units.length){
+      const u=units[selectedUnit];
+      const append = e.shiftKey;
+      const type = currentMode;
+      if(!append){ u.commands.length=0; u.restTarget=null; }
+      if(inBounds(tx,ty)) enqueueCommand(u, {tx,ty,type});
+    }
+  }
 });
 canvas.oncontextmenu = (e)=> e.preventDefault();
 
@@ -549,7 +751,7 @@ function renderUnitList(){
     `;
     card.addEventListener('click',(e)=>{
       const btn = e.target.closest('button[data-act]');
-      if(btn){ const act = btn.dataset.act; if(act==='select'){ selectedUnit = idx; } else if(act==='clear'){ u.commands.length=0; } }
+      if(btn){ const act = btn.dataset.act; if(act==='select'){ selectedUnit = idx; } else if(act==='clear'){ u.commands.length=0; u.restTarget=null; } }
       else { selectedUnit = idx; }
       renderTileInfo(); saveGame();
     });
@@ -557,7 +759,11 @@ function renderUnitList(){
   });
 }
 function iconFor(type){ if(type==='Tractor') return '🚜'; if(type==='Harvester') return '🧺'; if(type==='Sprayer') return '🧴'; return '🔧'; }
-function labelForCmd(c){ const nameMap = {auto:'Auto', move:'Move', field:'Field', plow:'Plow', seed:'Seed', spray:'Spray', harvest:'Harvest', stone:'Stone', snow:'Snow'}; return `${nameMap[c.type]||c.type} → (${c.tx},${c.ty})`; }
+function labelForCmd(c){
+  if(c.meta==='rest'){ const dest = c.restKind==='shelter' ? 'Shelter' : 'Road'; return `Rest to ${dest} → (${c.tx},${c.ty})`; }
+  const nameMap = {auto:'Auto', move:'Move', field:'Field', plow:'Plow', seed:'Seed', spray:'Spray', harvest:'Harvest', stone:'Stone', snow:'Snow'};
+  return `${nameMap[c.type]||c.type} → (${c.tx},${c.ty})`;
+}
 
 /* ===== Tile Info ===== */
 function tileName(t){ return t===TileType.GRASS?'Grass':t===TileType.FIELD?'Field':t===TileType.ROAD?'Road':t===TileType.SILO?'Silo':'Farm Hub'; }
@@ -566,7 +772,10 @@ function adviceFor(x,y){
   if(!inBounds(x,y)) return 'Out of bounds';
   const t = getTile(x,y); if(t===TileType.HOUSE) return 'Farm Hub: purchases spawn here.';
   const s = seasonFromMinutes(gameMinutes);
-  if(t===TileType.GRASS) return 'Use Tractor + FIELD to create a field here.';
+  if(t===TileType.GRASS){
+    if(s.seasonIndex===3 && getSnow(x,y)) return 'Winter: Clear snow here with a Tractor or convert to a field later.';
+    return 'Use Tractor + FIELD to create a field here.';
+  }
   if(t!==TileType.FIELD) return (t===TileType.ROAD && s.seasonIndex===3 && getSnow(x,y)) ? 'Winter: Snowplow to keep roads clear (Tractor).' : 'Non-farm tile.';
   const st = getStage(x,y);
   if(st===CROP_STAGE.BARE){ if(!getStone(x,y)) return 'Optional: Stone pick (bonus), then Plow.'; return 'Plow next (Tractor).'; }
@@ -581,6 +790,7 @@ function renderTileInfo(){
   rows.push(`<span>Type</span><span>${tileName(t)}</span>`);
   if(t===TileType.FIELD){ rows.push(`<span>Stage</span><span>${stageName(st)}</span>`); if(st===CROP_STAGE.GROWING){ rows.push(`<span>Growth</span><span>${Math.round(growthProgress(x,y)*100)}%</span>`); rows.push(`<span>Sprayed</span><span>${getSprayed(x,y)?'Yes (effective)':'No/ineffective'}</span>`); } else if(st===CROP_STAGE.READY){ rows.push(`<span>Ready Window</span><span>${Math.round((1-readyProgress(x,y))*100)}% left</span>`); } rows.push(`<span>Stone picked</span><span>${getStone(x,y)?'Yes (+10%)':'No'}</span>`); rows.push(`<span>Snow</span><span>${getSnow(x,y)?'Yes (clear with Snow)':'No'}</span>`); }
   else if(t===TileType.ROAD){ rows.push(`<span>Snow</span><span>${getSnow(x,y)?'Yes (Snowplow for $)':'No'}</span>`); }
+  else if(t===TileType.GRASS){ rows.push(`<span>Snow</span><span>${getSnow(x,y)?'Yes (clear with Snow)':'No'}</span>`); }
   rows.push(`<span>Tip</span><span>${adviceFor(x,y)}</span>`);
   tileKV.innerHTML = rows.map(r=>`<span>${r.split('</span><span>')[0]}</span><span>${r.split('</span><span>')[1]??''}</span>`).join('');
 }
@@ -737,7 +947,7 @@ function ensureOwnerTractor(){
     units.unshift(replacement);
   }
 }
-function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>{ u.commands = u.commands || []; u.isOwner = !!u.isOwner; u.alwaysActive = !!u.alwaysActive; units.push(u); }); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureOwnerTractor(); ensureGridDims(); return true; }catch(e){ return false; } }
+  function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>{ u.commands = u.commands || []; u.isOwner = !!u.isOwner; u.alwaysActive = !!u.alwaysActive; u.idleMinutes = u.idleMinutes ?? 0; u.restTarget = null; units.push(u); }); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureOwnerTractor(); ensureGridDims(); return true; }catch(e){ return false; } }
 
 /* ===== Tests ===== */
 function assert(cond, msg){ if(!cond) throw new Error(msg); }
@@ -787,13 +997,20 @@ function runTests(){
 /* ===== Assisted Planner (QoL) ===== */
 let ASSISTED = false;
 function applyPreset(){ ASSISTED = (presetSel.value==='assist'); MOVE_DELAY = ASSISTED ? 0.22 : 0.25; planBtn.style.display = ASSISTED ? 'inline-block' : 'none'; if(planScopeWrap) planScopeWrap.style.display = ASSISTED ? 'flex' : 'none'; if(planScopeSel) planScopeSel.disabled = !ASSISTED; }
-function nearestFirst(from, targets){ return targets.slice().sort((p,q)=> (Math.abs(from.x-p.x)+Math.abs(from.y-p.y)) - (Math.abs(from.x-q.x)+Math.abs(from.y-p.y))); }
+function nearestFirst(from, targets){
+  return targets.slice().sort((p,q)=>{
+    const distP = Math.abs(from.x-p.x) + Math.abs(from.y-p.y);
+    const distQ = Math.abs(from.x-q.x) + Math.abs(from.y-q.y);
+    return distP - distQ;
+  });
+}
 function listTilesWhere(pred){ const out=[]; for(let y=0;y<GRID_H;y++){ for(let x=0;x<GRID_W;x++){ if(pred(x,y)) out.push({x,y}); } } return out; }
 
 function assignUniqueTasks(units, tasks, perUnitLimit, actionType){
   if(!units.length || !tasks.length || perUnitLimit<=0) return;
   const remaining = tasks.slice();
   const assignedCount = new Map(units.map(u=>[u.id, 0]));
+  const priorityOf = (task)=> task && typeof task.priority==='number' ? task.priority : 0;
 
   // Round-robin through units, always giving the next task to the unit with
   // the smallest workload so we spread the queue evenly.
@@ -801,25 +1018,30 @@ function assignUniqueTasks(units, tasks, perUnitLimit, actionType){
     const eligible = units.filter(u=> (assignedCount.get(u.id) ?? 0) < perUnitLimit);
     if(!eligible.length) break;
 
+    const bestPriority = Math.min(...remaining.map(priorityOf));
+    const samePriority = remaining.filter(t=>priorityOf(t)===bestPriority);
+    if(!samePriority.length) break;
+
     eligible.sort((a,b)=>{
       const diff = (assignedCount.get(a.id) ?? 0) - (assignedCount.get(b.id) ?? 0);
       if(diff!==0) return diff;
-      const nearestA = nearestFirst(a, remaining)[0];
-      const nearestB = nearestFirst(b, remaining)[0];
+      const nearestA = nearestFirst(a, samePriority)[0];
+      const nearestB = nearestFirst(b, samePriority)[0];
       const distA = nearestA ? Math.abs(a.x-nearestA.x)+Math.abs(a.y-nearestA.y) : Infinity;
       const distB = nearestB ? Math.abs(b.x-nearestB.x)+Math.abs(b.y-nearestB.y) : Infinity;
       return distA - distB;
     });
 
     const unit = eligible[0];
-    const ordered = nearestFirst(unit, remaining);
+    const ordered = nearestFirst(unit, samePriority);
     const target = ordered[0];
     if(!target) break;
-    const idx = remaining.findIndex(p=>p.x===target.x && p.y===target.y);
+    const targetPriority = priorityOf(target);
+    const idx = remaining.findIndex(p=>p.x===target.x && p.y===target.y && priorityOf(p)===targetPriority);
     if(idx===-1) continue;
 
     remaining.splice(idx,1);
-    unit.commands.push({tx:target.x, ty:target.y, type:actionType});
+    enqueueCommand(unit, {tx:target.x, ty:target.y, type:actionType});
     assignedCount.set(unit.id, (assignedCount.get(unit.id) ?? 0) + 1);
   }
 }
@@ -827,17 +1049,31 @@ function assignUniqueTasks(units, tasks, perUnitLimit, actionType){
 function planCycle(){ if(!ASSISTED) return;
   const scope = planScopeSel ? planScopeSel.value : 'all';
   const planPlow = scope==='all' || scope==='plow';
+  const planStone = scope==='all' || scope==='plow' || scope==='stone';
   const planSeed = scope==='all' || scope==='seed';
   const planSpray = scope==='all' || scope==='spray';
   const planHarvest = scope==='all' || scope==='harvest';
+  const seasonInfo = seasonFromMinutes(gameMinutes);
+  const planSnow = seasonInfo.seasonIndex===3 && (scope==='all' || scope==='plow' || scope==='snow');
 
   const tractors = units.filter(u=>u.type===UnitType.TRACTOR);
   const sprayers = units.filter(u=>u.type===UnitType.SPRAYER);
   const harvesters = units.filter(u=>u.type===UnitType.HARVESTER);
   const caps = capacityNumbers();
 
-  if(planPlow || planSeed){
-    tractors.forEach(t=>{ t.commands.length=0; });
+  if(planPlow || planSeed || planSnow || planStone){
+    tractors.forEach(t=>{ t.commands.length=0; t.restTarget=null; });
+    if(planSnow){
+      const snowRoads = listTilesWhere((x,y)=> tiles[y][x]===TileType.ROAD && getSnow(x,y)).map(p=>({...p, priority:0}));
+      const snowFields = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && getSnow(x,y)).map(p=>({...p, priority:1}));
+      const snowGrass = listTilesWhere((x,y)=> tiles[y][x]===TileType.GRASS && getSnow(x,y)).map(p=>({...p, priority:2}));
+      const snowTargets = [...snowRoads, ...snowFields, ...snowGrass];
+      assignUniqueTasks(tractors, snowTargets, caps.perDayPlow, ACTION.SNOW);
+    }
+    if(planStone){
+      const stoneTargets = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.BARE && !getStone(x,y));
+      assignUniqueTasks(tractors, stoneTargets, caps.perDayPlow, ACTION.STONE);
+    }
     if(planPlow){
       const bare = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.BARE);
       assignUniqueTasks(tractors, bare, caps.perDayPlow, ACTION.PLOW);
@@ -849,13 +1085,13 @@ function planCycle(){ if(!ASSISTED) return;
   }
 
   if(planSpray){
-    sprayers.forEach(s=>{ s.commands.length=0; });
+    sprayers.forEach(s=>{ s.commands.length=0; s.restTarget=null; });
     const growWindow = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.GROWING && ((()=>{const gp=growthProgress(x,y); return gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO;})()));
     assignUniqueTasks(sprayers, growWindow, caps.perDaySpray, ACTION.SPRAY);
   }
 
   if(planHarvest){
-    harvesters.forEach(h=>{ h.commands.length=0; });
+    harvesters.forEach(h=>{ h.commands.length=0; h.restTarget=null; });
     const ready = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.READY);
     assignUniqueTasks(harvesters, ready, caps.perDayHarvest, ACTION.HARVEST);
   }
