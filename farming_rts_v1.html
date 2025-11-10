@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Farming RTS – Seasons, Shifts, Snowplow, Stone Picking (Stability Fix + Sunlight & Icons)</title>
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --panel2:#222; --line:#333; --accent:#2f7dd8; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:#eee; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif; display:grid; grid-template-columns: 300px 1fr; grid-template-rows:auto auto 1fr; gap:8px; }
+  header { grid-column:1 / -1; padding:10px 12px; }
+  h1 { margin:0; font-size:1.15rem; letter-spacing:.04em; text-transform:uppercase; }
+  #hud { grid-column:2 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:0 12px 6px; }
+  #stats { padding:6px 10px; border-radius:999px; background:#222; border:1px solid #444; font-size:.9rem; }
+  #controls, #modes, #shop { display:flex; gap:8px; flex-wrap:wrap; }
+  button { background:var(--accent); border:none; color:#fff; border-radius:999px; padding:6px 12px; font-size:.85rem; cursor:pointer; }
+  button.secondary { background:#444; }
+  button.ghost { background:transparent; border:1px solid #555; }
+  button.tiny { padding:4px 8px; font-size:.78rem; }
+  button.active { outline:2px solid #ffd700; }
+  button:disabled { background:#555; cursor:default; }
+  aside#sidebar { grid-row:2 / -1; grid-column:1; background:var(--panel); border-right:1px solid #3a3a3a; padding:10px; overflow:auto; }
+  #tileInfo, #unitList, #debug { background:var(--panel2); border:1px solid #3a3a3a; border-radius:10px; padding:10px; margin-bottom:10px; }
+  #tileInfo h2, #unitList h2, #debug h2 { margin:4px 0 8px; font-size:1rem; }
+  .kv { display:grid; grid-template-columns: auto 1fr; gap:4px 8px; font-size:.92rem; }
+  .kv span:nth-child(odd){ color:#bbb; }
+  .unitCard { background:#1f1f1f; border:1px solid #3a3a3a; border-radius:10px; padding:8px; margin-bottom:8px; }
+  .unitHeader { display:flex; justify-content:space-between; align-items:center; }
+  .tag { font-size:.75rem; padding:2px 6px; border-radius:8px; background:#444; }
+  .unitCard.selected { outline:2px solid #ffd700; }
+  .queueList { margin:6px 0 0; padding-left:16px; font-size:.85rem; color:#ddd; }
+  #boardWrap { grid-column:2; grid-row:3; display:flex; justify-content:center; padding:8px 12px 16px; }
+  #gameContainer { background:#000; padding:10px; border-radius:16px; box-shadow:0 0 20px rgba(0,0,0,.6); height:max-content; }
+  canvas { border-radius:8px; display:block; background:#223322; }
+  details { grid-column:2; color:#ccc; margin:0 12px 8px; }
+  summary { cursor:pointer; font-weight:600; }
+  .test-pass { color:#7CFC00; }
+  .test-fail { color:#ff6b6b; }
+</style>
+</head>
+<body>
+  <header><h1>Farming RTS</h1></header>
+
+  <div id="hud">
+    <div id="stats">💰 <span id="money">0</span> | 📅 Day <span id="day">1</span> | 🕒 <span id="time">08:00</span> | 🌦 <span id="season">Spring, Day 1</span> | 👷 Shift <span id="shift">On</span></div>
+    <div id="modes" title="Choose command mode">
+      <button class="secondary active" data-mode="auto">Auto</button>
+      <button class="secondary" data-mode="move">Move</button>
+      <button class="secondary" data-mode="field">Field</button>
+      <button class="secondary" data-mode="plow">Plow</button>
+      <button class="secondary" data-mode="seed">Seed</button>
+      <button class="secondary" data-mode="spray">Spray</button>
+      <button class="secondary" data-mode="harvest">Harvest</button>
+      <button class="secondary" data-mode="stone">Stone</button>
+      <button class="secondary" data-mode="snow">Snow</button>
+    </div>
+    <div id="controls">
+      <button id="pauseBtn">Pause</button>
+      <button id="speed1Btn">1×</button>
+      <button id="speed3Btn">3×</button>
+      <button id="resetBtn" class="ghost">Reset Farm</button>
+      <label style="margin-left:8px;font-size:.85rem;display:flex;gap:6px;align-items:center;">
+        Preset:
+        <select id="preset">
+          <option value="real">Realistic</option>
+          <option value="assist">Assisted (QoL)</option>
+        </select>
+      </label>
+      <button id="planBtn" class="ghost" title="Auto-queue a full cycle for available machines">Plan Cycle</button>
+    </div>
+    <div id="shop">
+      <button id="buyTractorBtn">Buy 🚜 Tractor (2000)</button>
+      <button id="buyHarvesterBtn">Buy 🧺 Harvester (3500)</button>
+      <button id="buySprayerBtn">Buy 🧴 Sprayer (2500)</button>
+    </div>
+  </div>
+
+  <aside id="sidebar">
+    <section id="tileInfo">
+      <h2>Tile Info</h2>
+      <div class="kv" id="tileKV"></div>
+    </section>
+    <section id="unitList">
+      <h2>Machines & Queues</h2>
+    </section>
+    <section id="debug">
+      <h2>Debug / Tests</h2>
+      <div id="testResults" style="font-size:.9rem;"></div>
+      <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+        <button id="runTestsBtn" class="tiny secondary">Run tests</button>
+      </div>
+    </section>
+  </aside>
+
+  <details open>
+    <summary>How to play</summary>
+    <ul>
+      <li><b>H = Farm Hub</b> — high-contrast tile(s) where <b>new equipment spawns</b>.</li>
+      <li><b>Left-click</b> a tile for info or a unit to select it. <b>Right-click</b> to issue an order. <b>Shift+Right-click</b> queues.</li>
+      <li>Start by creating fields (mode = <b>Field</b>, use a Tractor on grass). Then <b>Plow → Seed → Spray → Harvest</b>.</li>
+      <li>Spray early/mid Growing for a bonus. Ready crops decay if ignored.</li>
+      <li>Auto-save is enabled. Use <b>Reset Farm</b> to wipe progress.</li>
+      <li><b>Seasons</b>: Spring → Summer → Autumn → Winter (<b>4 days each</b>). Winter is dormant for crops, but you can <b>Snowplow</b> roads/fields.</li>
+      <li><b>Shifts</b>: Workers operate <b>10 in-game hours/day</b> (08:00–18:00). Outside shift they rest.</li>
+      <li><b>Balance</b>: 1× Tractor + 1× Sprayer + 1× Harvester can maintain ~50 field tiles if you stagger tasks; 2× of each ≈ 100 tiles, etc.</li>
+      <li><b>Stone picking</b> (Tractor): do it on a field before seeding to get a small harvest bonus.</li>
+    </ul>
+  </details>
+
+  <div id="boardWrap">
+    <div id="gameContainer">
+      <canvas id="game" width="704" height="448"></canvas>
+    </div>
+  </div>
+
+<script>
+'use strict';
+/* ==================================
+   Grid safety + bounds helpers first
+   ================================== */
+const TILE_SIZE = 33;
+const GRID_W = 60;
+const GRID_H = 40;
+
+function inBounds(x,y){ return x>=0 && y>=0 && x<GRID_W && y<GRID_H; }
+function getCell(grid,x,y,def){ const row = grid[y]; if(!row) return def; const v = row[x]; return (v===undefined)? def : v; }
+function setCell(grid,x,y,val){ if(!grid[y]) grid[y]=[]; grid[y][x]=val; }
+function ensureGridDims(){
+  const grids = [tiles,crops,cropTimers,readyTimers,sprayed,snow,stonePicked];
+  for(const g of grids){
+    for(let y=0;y<GRID_H;y++){
+      if(!g[y]) g[y]=[];
+      for(let x=0;x<GRID_W;x++){
+        if(g===tiles && g[y][x]===undefined) g[y][x]=TileType.GRASS;
+        if(g===crops && g[y][x]===undefined) g[y][x]=CROP_STAGE.NONE;
+        if(g===cropTimers && g[y][x]===undefined) g[y][x]=0;
+        if(g===readyTimers && g[y][x]===undefined) g[y][x]=0;
+        if(g===sprayed && g[y][x]===undefined) g[y][x]=false;
+        if(g===snow && g[y][x]===undefined) g[y][x]=false;
+        if(g===stonePicked && g[y][x]===undefined) g[y][x]=false;
+      }
+    }
+  }
+}
+
+/* ===== Game constants ===== */
+const TileType = { GRASS:0, FIELD:1, ROAD:2, SILO:3, HOUSE:4 };
+const CROP_STAGE = { NONE:-1, BARE:0, PLOWED:1, GROWING:2, READY:3 };
+
+const ACTION = { MOVE:'move', FIELD:'field', PLOW:'plow', SEED:'seed', SPRAY:'spray', HARVEST:'harvest', STONE:'stone', SNOW:'snow', AUTO:'auto' };
+
+// ===== Seasons =====
+const SEASONS = ['Spring','Summer','Autumn','Winter'];
+const DAYS_PER_SEASON = 4;                 // 4 days per season (humane length)
+const MINUTES_PER_DAY = 24*60;             // in-game minutes per day
+const REAL_SECONDS_PER_INGAME_DAY = 300;   // 5 real min per in-game day
+
+// ===== Shifts =====
+const SHIFT_START_H = 6;                   // 06:00
+const SHIFT_END_H   = 22;                  // 22:00
+const SHIFT_FRACTION = (SHIFT_END_H - SHIFT_START_H) / 24;
+const SHIFT_SECONDS_PER_INGAME_DAY = REAL_SECONDS_PER_INGAME_DAY * SHIFT_FRACTION;
+
+function seasonFromMinutes(totalMinutes){
+  const dayAbs = Math.floor(totalMinutes / MINUTES_PER_DAY);
+  const year = 1 + Math.floor(dayAbs / (DAYS_PER_SEASON*SEASONS.length));
+  const dayInYear = dayAbs % (DAYS_PER_SEASON*SEASONS.length);
+  const seasonIndex = Math.floor(dayInYear / DAYS_PER_SEASON);
+  const dayInSeason = 1 + (dayInYear % DAYS_PER_SEASON);
+  return {year, seasonIndex, seasonName: SEASONS[seasonIndex], dayInSeason};
+}
+function seasonGrowthMult(seasonIndex){ return [1.0, 1.25, 0.8, 0.0][seasonIndex]; }
+function seasonDecayMult(seasonIndex){ return [1.0, 1.0, 1.0, 1.5][seasonIndex]; }
+function winterHarvestPenalty(seasonIndex){ return (seasonIndex===3) ? 0.8 : 1.0; }
+
+const FIELDIFY_TIME = 2; let FIELDIFY_COST = 60;
+// Action times tuned so a single unit can finish ~50 tiles within one 10h shift
+let PLOW_TIME = 2.5;
+let SEED_TIME = 2.5;
+let SPRAY_TIME = 2.5;
+let HARVEST_TIME = 2.5;
+let STONE_TIME = 2.5;   // pre-seeding QoL
+let SNOW_TIME = 2.0;    // winter activity
+
+const GROWTH_TIME = 1200;      // ≈2 in-game days seed → ready
+const READY_WINDOW = 300;     // ≈1 in-game day to harvest
+const SPRAY_BEST_FROM = 0.15; const SPRAY_BEST_TO = 0.75;
+
+let MOVE_DELAY = 0.25;  // responsive
+let BASE_VALUE = 140; let BONUS_VALUE = 210; // spray bonus
+const STONE_BONUS_MULT = 1.1; // harvest +10% if stone-picked
+const SNOWPLOW_PAY = 5;       // small income per snow tile cleared
+
+const COST = { TRACTOR:2000, HARVESTER:3500, SPRAYER:2500 };
+
+
+
+
+/* ===== Map ===== */
+const baseRows = [
+  "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+  "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+  "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+  "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+  "ggggggggggggrggggggggggggggggggggggggggggggggggggggggggggggg",
+  "ggggggggggggrggggggggggggggggggggggggggggggggggggggggggggggg",
+  "ggggggggggggrggggggggggggggggggggggggggggggggggggggggggggggg",
+  "ggggHHHHHHHHrggggggggggggggggggggggggggggggggggggggggggggggg",
+  "ggggHHHHHHHHrggggggggggggggggggggggggggggggggggggggggggggggg",
+  "ggggrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrggggggggggggggggggg",
+  "ggggggggSgSgrHggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "ggggggggggggggggggggggggggggggggggggggggrggggggggggggggggggg",
+  "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+  "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+  "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+];
+
+/* ===== State ===== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const moneySpan = document.getElementById('money');
+const daySpan = document.getElementById('day');
+const timeSpan = document.getElementById('time');
+const seasonLabel = document.getElementById('season');
+const shiftLabel = document.getElementById('shift');
+const pauseBtn = document.getElementById('pauseBtn');
+const speed1Btn = document.getElementById('speed1Btn');
+const speed3Btn = document.getElementById('speed3Btn');
+const resetBtn = document.getElementById('resetBtn');
+const presetSel = document.getElementById('preset');
+const planBtn = document.getElementById('planBtn');
+const buyTractorBtn = document.getElementById('buyTractorBtn');
+const buyHarvesterBtn = document.getElementById('buyHarvesterBtn');
+const buySprayerBtn = document.getElementById('buySprayerBtn');
+const unitListEl = document.getElementById('unitList');
+const tileKV = document.getElementById('tileKV');
+const runTestsBtn = document.getElementById('runTestsBtn');
+const testResults = document.getElementById('testResults');
+
+const modeBar = document.getElementById('modes');
+let currentMode = ACTION.AUTO;
+
+canvas.width = GRID_W * TILE_SIZE;
+canvas.height = GRID_H * TILE_SIZE;
+
+let tiles = [], crops = [], cropTimers = [], readyTimers = [], sprayed = [];
+let snow = [], stonePicked = [];
+let selectedTile = {x: 0, y: 0};
+
+let lastSeasonIndex = 0;
+
+/* Hub helpers */
+function getHubTiles(){ const list=[]; for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++) if(baseRows[y][x]==='H') list.push({x,y}); return list; }
+function getHubSpawn(){ const hs=getHubTiles(); if(!hs.length) return {x:4,y:7}; const avgX=Math.round(hs.reduce((a,c)=>a+c.x,0)/hs.length), avgY=Math.round(hs.reduce((a,c)=>a+c.y,0)/hs.length); let best=hs[0],d=1e9; for(const h of hs){const dd=Math.abs(h.x-avgX)+Math.abs(h.y-avgY); if(dd<d){d=dd; best=h;}} return best; }
+
+function initMap(newGame=false){
+  for(let y=0;y<GRID_H;y++){
+    tiles[y]=[]; crops[y]=[]; cropTimers[y]=[]; readyTimers[y]=[]; sprayed[y]=[]; snow[y]=[]; stonePicked[y]=[];
+    for(let x=0;x<GRID_W;x++){
+      const row = baseRows[y] || '';
+      const ch  = row[x] || 'g';   // 'g' = grass
+      let t = TileType.GRASS; if(ch==='r') t=TileType.ROAD; else if(ch==='S') t=TileType.SILO; else if(ch==='H') t=TileType.HOUSE;
+      tiles[y][x]=t; crops[y][x]=CROP_STAGE.NONE; cropTimers[y][x]=0; readyTimers[y][x]=0; sprayed[y][x]=false; stonePicked[y][x]=false; snow[y][x]=false;
+    }
+  }
+  if(newGame){ const hub=getHubSpawn(); const dirs=[{dx:1,dy:0},{dx:-1,dy:0},{dx:0,dy:1},{dx:0,dy:-1}]; for(const d of dirs){const nx=hub.x+d.dx, ny=hub.y+d.dy; if(inBounds(nx,ny) && tiles[ny][nx]===TileType.GRASS){ tiles[ny][nx]=TileType.FIELD; crops[ny][nx]=CROP_STAGE.BARE; break; }} }
+  ensureGridDims();
+}
+
+/* ===== Units ===== */
+const UnitType = { TRACTOR:'Tractor', HARVESTER:'Harvester', SPRAYER:'Sprayer' };
+const units = []; let nextUnitId = 1; let selectedUnit = 0;
+
+function createUnit(type,x,y){ return { id: nextUnitId++, type, x, y, moveCooldown:0, commands:[], action:null, actionTimer:0, workX:null, workY:null, state:'idle' }; }
+function initUnits(){ units.length=0; const hub=getHubSpawn(); units.push(createUnit(UnitType.TRACTOR, hub.x, hub.y)); selectedUnit=0; }
+
+function unitCanDo(unit, action){
+  if(action===ACTION.MOVE || action===ACTION.AUTO) return true;
+  if(unit.type===UnitType.TRACTOR) return (action===ACTION.FIELD || action===ACTION.PLOW || action===ACTION.SEED || action===ACTION.STONE || action===ACTION.SNOW);
+  if(unit.type===UnitType.HARVESTER) return (action===ACTION.HARVEST);
+  if(unit.type===UnitType.SPRAYER) return (action===ACTION.SPRAY);
+  return false;
+}
+
+/* ===== Time & Economy ===== */
+let money = 7000; let gameMinutes = 8*60; let paused=false; let timeScale=1;
+
+function withinShift(){ const minuteInDay=Math.floor(gameMinutes%MINUTES_PER_DAY); const hour=Math.floor(minuteInDay/60); return (hour>=SHIFT_START_H && hour<SHIFT_END_H); }
+
+function updateGameClock(dt){
+  const simDt = dt * timeScale;
+  const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
+  gameMinutes += simDt * minutesPerRealSecond;
+  const minutesPerDay = MINUTES_PER_DAY;
+  const day = 1 + Math.floor(gameMinutes/minutesPerDay);
+  const minuteInDay = Math.floor(gameMinutes%minutesPerDay);
+  const hour = Math.floor(minuteInDay/60);
+  const minute = minuteInDay%60;
+  daySpan.textContent = String(day);
+  timeSpan.textContent = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
+  const s = seasonFromMinutes(gameMinutes);
+  if(seasonLabel) seasonLabel.textContent = `${s.seasonName}, Day ${s.dayInSeason}`;
+  if(shiftLabel) shiftLabel.textContent = withinShift()? 'On' : 'Off';
+  if(s.seasonIndex!==lastSeasonIndex){ onSeasonChanged(lastSeasonIndex, s.seasonIndex); lastSeasonIndex = s.seasonIndex; }
+}
+
+function onSeasonChanged(prev, now){
+  // When Winter starts, blanket snow over roads & fields to enable snowplowing.
+  if(now===3){ for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++) if(tiles[y][x]===TileType.ROAD || tiles[y][x]===TileType.FIELD) snow[y][x]=true; }
+  // Optional: melt on Spring
+  if(prev===3 && now===0){ for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++) snow[y][x]=false; }
+}
+
+/* ===== Crops ===== */
+function updateCrops(dt){
+  const s = seasonFromMinutes(gameMinutes);
+  const growMult = seasonGrowthMult(s.seasonIndex);
+  const decayMult = seasonDecayMult(s.seasonIndex);
+  const simDt = dt*timeScale;
+  for(let y=0;y<GRID_H;y++){
+    for(let x=0;x<GRID_W;x++){
+      const stage = crops[y][x];
+      if(stage===CROP_STAGE.GROWING){
+        cropTimers[y][x]+=simDt*growMult;
+        if(cropTimers[y][x]>=GROWTH_TIME){ crops[y][x]=CROP_STAGE.READY; readyTimers[y][x]=0; cropTimers[y][x]=0; }
+      } else if(stage===CROP_STAGE.READY){
+        readyTimers[y][x]+=simDt*decayMult;
+        if(readyTimers[y][x]>=READY_WINDOW){ crops[y][x]=CROP_STAGE.BARE; sprayed[y][x]=false; readyTimers[y][x]=0; stonePicked[y][x]=false; }
+      }
+    }
+  }
+}
+
+function growthProgress(x,y){ return getCell(crops,x,y,CROP_STAGE.NONE)===CROP_STAGE.GROWING ? Math.max(0, Math.min(1, getCell(cropTimers,x,y,0) / GROWTH_TIME)) : 0; }
+function readyProgress(x,y){ return getCell(crops,x,y,CROP_STAGE.NONE)===CROP_STAGE.READY ? Math.max(0, Math.min(1, getCell(readyTimers,x,y,0) / READY_WINDOW)) : 0; }
+
+/* ===== Commands ===== */
+function stepTowards(u, tx, ty){ if(u.x<tx) u.x++; else if(u.x>tx) u.x--; else if(u.y<ty) u.y++; else if(u.y>ty) u.y--; }
+
+function getTile(x,y){ return inBounds(x,y) ? tiles[y][x] : null; }
+function getStage(x,y){ return inBounds(x,y) ? crops[y][x] : CROP_STAGE.NONE; }
+function getSnow(x,y){ return inBounds(x,y) ? snow[y][x] : false; }
+function getSprayed(x,y){ return inBounds(x,y) ? sprayed[y][x] : false; }
+function getStone(x,y){ return inBounds(x,y) ? stonePicked[y][x] : false; }
+
+function autoPickActionForTile(unit, tx, ty){
+  if(!inBounds(tx,ty)) return null;
+  const t = getTile(tx,ty); const s = seasonFromMinutes(gameMinutes);
+  if(unit.type===UnitType.TRACTOR){
+    if(s.seasonIndex===3){ if((t===TileType.ROAD||t===TileType.FIELD)&&getSnow(tx,ty)) return ACTION.SNOW; return null; }
+    if(t===TileType.GRASS) return ACTION.FIELD;
+    if(t!==TileType.FIELD) return null;
+    const stage = getStage(tx,ty);
+    if(stage===CROP_STAGE.BARE && !getStone(tx,ty)) return ACTION.STONE; // optional
+    if(stage===CROP_STAGE.BARE) return ACTION.PLOW;
+    if(stage===CROP_STAGE.PLOWED) return ACTION.SEED;
+  }
+  if(unit.type===UnitType.SPRAYER){ if(t===TileType.FIELD && getStage(tx,ty)===CROP_STAGE.GROWING) return ACTION.SPRAY; }
+  if(unit.type===UnitType.HARVESTER){ if(t===TileType.FIELD && getStage(tx,ty)===CROP_STAGE.READY) return ACTION.HARVEST; }
+  return null;
+}
+
+function tryStartWork(u, tx, ty, action){
+  if(!inBounds(tx,ty)) return false;
+  const tile = getTile(tx,ty);
+  if(action===ACTION.MOVE) return false;
+
+  // Respect shift hours
+  if(!withinShift()) return false;
+
+  let chosen = action===ACTION.AUTO ? autoPickActionForTile(u, tx, ty) : action;
+  if(!chosen) return false; if(!unitCanDo(u, chosen)) return false;
+
+  // Field creation
+  if(chosen===ACTION.FIELD){ if(tile!==TileType.GRASS) return false; if(money < FIELDIFY_COST) return false; u.action=ACTION.FIELD; u.actionTimer=FIELDIFY_TIME; u.workX=tx; u.workY=ty; u.state='working'; money-=FIELDIFY_COST; return true; }
+
+  // Stone picking (before seeding)
+  if(chosen===ACTION.STONE){ if(tile!==TileType.FIELD) return false; const st=getStage(tx,ty); if(!(st===CROP_STAGE.BARE || st===CROP_STAGE.PLOWED)) return false; if(getStone(tx,ty)) return false; u.action=ACTION.STONE; u.actionTimer=STONE_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
+
+  // Snow plow (Winter)
+  if(chosen===ACTION.SNOW){ const s=seasonFromMinutes(gameMinutes); if(s.seasonIndex!==3) return false; if(!(tile===TileType.ROAD||tile===TileType.FIELD)) return false; if(!getSnow(tx,ty)) return false; u.action=ACTION.SNOW; u.actionTimer=SNOW_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
+
+  // Farm actions need a field
+  if(tile!==TileType.FIELD) return false;
+  const stage = getStage(tx,ty); let dur = 0;
+  if(chosen===ACTION.PLOW && stage===CROP_STAGE.BARE) dur=PLOW_TIME;
+  else if(chosen===ACTION.SEED && stage===CROP_STAGE.PLOWED){ const s=seasonFromMinutes(gameMinutes); if(s.seasonIndex===3) return false; dur=SEED_TIME; }
+  else if(chosen===ACTION.SPRAY && stage===CROP_STAGE.GROWING) dur=SPRAY_TIME;
+  else if(chosen===ACTION.HARVEST && stage===CROP_STAGE.READY) dur=HARVEST_TIME;
+  else return false;
+
+  u.action = chosen; u.actionTimer = dur; u.workX = tx; u.workY = ty; u.state='working';
+  return true;
+}
+
+function finishAction(u){
+  const x=u.workX, y=u.workY; if(!inBounds(x??-1,y??-1)){ u.action=null; u.state='idle'; return; }
+  const tile = getTile(x,y);
+
+  if(u.action===ACTION.FIELD){ if(tile===TileType.GRASS){ tiles[y][x]=TileType.FIELD; crops[y][x]=CROP_STAGE.BARE; cropTimers[y][x]=0; readyTimers[y][x]=0; sprayed[y][x]=false; stonePicked[y][x]=false; } }
+  else if(u.action===ACTION.STONE){ stonePicked[y][x]=true; }
+  else if(u.action===ACTION.SNOW){ if(snow[y][x]){ snow[y][x]=false; money += SNOWPLOW_PAY; } }
+  else if(tile===TileType.FIELD){
+    const stage=crops[y][x];
+    if(u.action===ACTION.PLOW && stage===CROP_STAGE.BARE){ crops[y][x]=CROP_STAGE.PLOWED; }
+    else if(u.action===ACTION.SEED && stage===CROP_STAGE.PLOWED){ crops[y][x]=CROP_STAGE.GROWING; cropTimers[y][x]=0; sprayed[y][x]=false; }
+    else if(u.action===ACTION.SPRAY && stage===CROP_STAGE.GROWING){ const gp=growthProgress(x,y); sprayed[y][x]=(gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO); }
+    else if(u.action===ACTION.HARVEST && stage===CROP_STAGE.READY){ const s=seasonFromMinutes(gameMinutes); const valueBase = sprayed[y][x] ? BONUS_VALUE : BASE_VALUE; const stoneBonus = stonePicked[y][x] ? STONE_BONUS_MULT : 1.0; const penalty = winterHarvestPenalty(s.seasonIndex); const value = Math.round(valueBase * stoneBonus * penalty); money += value; crops[y][x]=CROP_STAGE.BARE; sprayed[y][x]=false; stonePicked[y][x]=false; cropTimers[y][x]=0; readyTimers[y][x]=0; }
+  }
+
+  u.action=null; u.state='idle'; u.workX=null; u.workY=null;
+}
+
+function updateUnits(dt){
+  const simDt = dt*timeScale; const onShift = withinShift();
+  for(const u of units){
+    if(u.actionTimer>0){ if(onShift){ u.actionTimer -= simDt; if(u.actionTimer<=0) finishAction(u); } continue; }
+    if(u.commands.length>0){ const cmd=u.commands[0]; const {tx,ty,type}=cmd; if(u.x===tx && u.y===ty){ if(onShift) tryStartWork(u, tx, ty, type); u.commands.shift(); } else { if(onShift){ u.moveCooldown -= simDt; if(u.moveCooldown<=0){ stepTowards(u, tx, ty); u.moveCooldown = MOVE_DELAY; u.state='moving'; } } } }
+    else { if(u.state!=='idle') u.state='idle'; }
+  }
+}
+
+/* ===== Input ===== */
+canvas.addEventListener('mousedown', (e)=>{
+  const rect = canvas.getBoundingClientRect(); const mx = e.clientX - rect.left; const my = e.clientY - rect.top; const tx = Math.floor(mx / TILE_SIZE); const ty = Math.floor(my / TILE_SIZE);
+  if(e.button===0){ let found=-1; for(let i=0;i<units.length;i++){ if(units[i].x===tx && units[i].y===ty){ found=i; break; } } if(found!==-1){ selectedUnit = found; } selectedTile = {x:tx, y:ty}; renderTileInfo(); }
+  else if(e.button===2){ if(selectedUnit>=0 && selectedUnit<units.length){ const u=units[selectedUnit]; const append = e.shiftKey; const type = currentMode; if(!append) u.commands.length=0; if(inBounds(tx,ty)) u.commands.push({tx,ty,type}); } }
+});
+canvas.oncontextmenu = (e)=> e.preventDefault();
+
+/* ===== UI ===== */
+pauseBtn.onclick = ()=>{ paused=!paused; pauseBtn.textContent = paused?'Resume':'Pause'; };
+speed1Btn.onclick = ()=> timeScale = 1;
+speed3Btn.onclick = ()=> timeScale = 3;
+resetBtn.onclick = ()=> { localStorage.removeItem('farm_rts_save'); startNewGame(); };
+
+function addMoneySafe(v){ money += v; if(money<0) money=0; }
+function spawnAtHub(type){ const hub = getHubSpawn(); const u = createUnit(type, hub.x, hub.y); units.push(u); selectedUnit = units.length-1; }
+
+buyTractorBtn.onclick = ()=>{ if(money>=COST.TRACTOR){ addMoneySafe(-COST.TRACTOR); spawnAtHub(UnitType.TRACTOR); saveGame(); } };
+buyHarvesterBtn.onclick = ()=>{ if(money>=COST.HARVESTER){ addMoneySafe(-COST.HARVESTER); spawnAtHub(UnitType.HARVESTER); saveGame(); } };
+buySprayerBtn.onclick = ()=>{ if(money>=COST.SPRAYER){ addMoneySafe(-COST.SPRAYER); spawnAtHub(UnitType.SPRAYER); saveGame(); } };
+
+modeBar.addEventListener('click', (e)=>{ const b = e.target.closest('button[data-mode]'); if(!b) return; for(const btn of modeBar.querySelectorAll('button')) btn.classList.remove('active'); b.classList.add('active'); currentMode = b.dataset.mode; });
+
+/* ===== Sidebar: Unit list ===== */
+function renderUnitList(){
+  // Clear old cards
+  unitListEl.querySelectorAll('.unitCard').forEach(n=>n.remove());
+  units.forEach((u,idx)=>{
+    const card = document.createElement('div');
+    card.className = 'unitCard'+(idx===selectedUnit?' selected':'');
+    card.innerHTML = `
+      <div class="unitHeader">
+        <div><strong>#${u.id}</strong> ${iconFor(u.type)} ${u.type}</div>
+        <span class="tag">${u.state}</span>
+      </div>
+      <div style="margin-top:4px;font-size:.86rem;color:#bbb;">Pos: (${u.x},${u.y})</div>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <button class="tiny secondary" data-act="select">Select</button>
+        <button class="tiny secondary" data-act="clear">Clear queue</button>
+      </div>
+      <div style="margin-top:6px;font-size:.86rem;">Queue:</div>
+      <ol class="queueList">
+        ${u.commands.map(c=>`<li>${labelForCmd(c)}</li>`).join('') || '<li><em>empty</em></li>'}
+      </ol>
+    `;
+    card.addEventListener('click',(e)=>{
+      const btn = e.target.closest('button[data-act]');
+      if(btn){ const act = btn.dataset.act; if(act==='select'){ selectedUnit = idx; } else if(act==='clear'){ u.commands.length=0; } }
+      else { selectedUnit = idx; }
+      renderTileInfo(); saveGame();
+    });
+    unitListEl.appendChild(card);
+  });
+}
+function iconFor(type){ if(type==='Tractor') return '🚜'; if(type==='Harvester') return '🧺'; if(type==='Sprayer') return '🧴'; return '🔧'; }
+function labelForCmd(c){ const nameMap = {auto:'Auto', move:'Move', field:'Field', plow:'Plow', seed:'Seed', spray:'Spray', harvest:'Harvest', stone:'Stone', snow:'Snow'}; return `${nameMap[c.type]||c.type} → (${c.tx},${c.ty})`; }
+
+/* ===== Tile Info ===== */
+function tileName(t){ return t===TileType.GRASS?'Grass':t===TileType.FIELD?'Field':t===TileType.ROAD?'Road':t===TileType.SILO?'Silo':'Farm Hub'; }
+function stageName(s){ return s===CROP_STAGE.BARE?'Bare' : s===CROP_STAGE.PLOWED?'Plowed' : s===CROP_STAGE.GROWING?'Growing' : s===CROP_STAGE.READY?'Ready' : '—'; }
+function adviceFor(x,y){
+  if(!inBounds(x,y)) return 'Out of bounds';
+  const t = getTile(x,y); if(t===TileType.HOUSE) return 'Farm Hub: purchases spawn here.';
+  const s = seasonFromMinutes(gameMinutes);
+  if(t===TileType.GRASS) return 'Use Tractor + FIELD to create a field here.';
+  if(t!==TileType.FIELD) return (t===TileType.ROAD && s.seasonIndex===3 && getSnow(x,y)) ? 'Winter: Snowplow to keep roads clear (Tractor).' : 'Non-farm tile.';
+  const st = getStage(x,y);
+  if(st===CROP_STAGE.BARE){ if(!getStone(x,y)) return 'Optional: Stone pick (bonus), then Plow.'; return 'Plow next (Tractor).'; }
+  if(st===CROP_STAGE.PLOWED){ if(s.seasonIndex===3) return 'Too cold: seeding disabled in Winter.'; return 'Seed next (Tractor).'; }
+  if(st===CROP_STAGE.GROWING){ const gp=growthProgress(x,y); if(s.seasonIndex===3) return 'Dormant in Winter. Wait for Spring.'; if(gp < SPRAY_BEST_FROM) return 'Growing… Spray soon for bonus.'; if(gp <= SPRAY_BEST_TO) return 'Spray now (Sprayer) for bonus yield.'; return 'Growing… (late for bonus). Wait for Ready → Harvest.'; }
+  if(st===CROP_STAGE.READY){ const rp=readyProgress(x,y); const winterNote = s.seasonIndex===3 ? ' (decays faster in Winter)' : ''; return (rp<0.5) ? `Ready — Harvest soon${winterNote}.` : `Urgent: Harvest before decay!${winterNote}`; }
+  return '—';
+}
+function renderTileInfo(){
+  const x = selectedTile.x, y = selectedTile.y; const t = inBounds(x,y)? getTile(x,y) : undefined; const st = (t===TileType.FIELD) ? getStage(x,y) : CROP_STAGE.NONE; const rows = [];
+  rows.push(`<span>Position</span><span>(${x},${y})</span>`);
+  rows.push(`<span>Type</span><span>${tileName(t)}</span>`);
+  if(t===TileType.FIELD){ rows.push(`<span>Stage</span><span>${stageName(st)}</span>`); if(st===CROP_STAGE.GROWING){ rows.push(`<span>Growth</span><span>${Math.round(growthProgress(x,y)*100)}%</span>`); rows.push(`<span>Sprayed</span><span>${getSprayed(x,y)?'Yes (effective)':'No/ineffective'}</span>`); } else if(st===CROP_STAGE.READY){ rows.push(`<span>Ready Window</span><span>${Math.round((1-readyProgress(x,y))*100)}% left</span>`); } rows.push(`<span>Stone picked</span><span>${getStone(x,y)?'Yes (+10%)':'No'}</span>`); rows.push(`<span>Snow</span><span>${getSnow(x,y)?'Yes (clear with Snow)':'No'}</span>`); }
+  else if(t===TileType.ROAD){ rows.push(`<span>Snow</span><span>${getSnow(x,y)?'Yes (Snowplow for $)':'No'}</span>`); }
+  rows.push(`<span>Tip</span><span>${adviceFor(x,y)}</span>`);
+  tileKV.innerHTML = rows.map(r=>`<span>${r.split('</span><span>')[0]}</span><span>${r.split('</span><span>')[1]??''}</span>`).join('');
+}
+
+/* ===== Color & lighting helpers ===== */
+function clamp01(v){ return Math.max(0, Math.min(1, v)); }
+function hexToRgb(hex){ hex = hex.replace('#',''); if(hex.length===3){ hex = hex.split('').map(c=>c+c).join(''); } const num = parseInt(hex,16); return {r:(num>>16)&255, g:(num>>8)&255, b:num&255}; }
+function rgbToHex(r,g,b){ const n=(r<<16)|(g<<8)|b; return '#'+n.toString(16).padStart(6,'0'); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function lerpColor(hexA,hexB,t){ const A=hexToRgb(hexA), B=hexToRgb(hexB); return rgbToHex(Math.round(lerp(A.r,B.r,t)), Math.round(lerp(A.g,B.g,t)), Math.round(lerp(A.b,B.b,t))); }
+function brighten(hex, factor){ const c=hexToRgb(hex); const r=clamp01(factor); const rr=Math.min(255, Math.round(c.r*r)); const gg=Math.min(255, Math.round(c.g*r)); const bb=Math.min(255, Math.round(c.b*r)); return rgbToHex(rr,gg,bb); }
+
+// Day/night factor: 0.6 at midnight → 1.2 at noon
+function dayLightFactor(){
+  const minuteInDay = Math.floor(gameMinutes%MINUTES_PER_DAY);
+  const h = minuteInDay/60;           // 0..24
+  // shift so 12:00 is peak; cosine curve from 0 at midnight to 1 at noon
+  const t = Math.cos((Math.PI * (h-12))/12); // -1..1
+  const k = clamp01((t+1)/2);               // 0..1 with peak at noon
+  return 0.6 + 0.6*k;                       // 0.6..1.2
+}
+
+function sunPosition(){
+  const minuteInDay = Math.floor(gameMinutes%MINUTES_PER_DAY);
+  const h = minuteInDay/60; // 0..24
+  const x = (h/24)*canvas.width;
+  const height = Math.sin(Math.PI * clamp01((h-6)/12)); // 0 at 6 & 18, 1 at 12
+  const y = (1-height)*canvas.height*0.7 + canvas.height*0.05; // arc over top third
+  return {x, y, height: clamp01(height)};
+}
+
+/* ===== Rendering ===== */
+function drawTiles(){
+  const hubSet = new Set(getHubTiles().map(h=>`${h.x},${h.y}`));
+  const light = dayLightFactor();
+  for(let y=0;y<GRID_H;y++){
+    for(let x=0;x<GRID_W;x++){
+      const t=tiles[y][x]; let fill='#265626';
+      if(t===TileType.ROAD) fill='#6e4038';
+      else if(t===TileType.SILO) fill='#7f8799';
+      else if(t===TileType.HOUSE) fill='#0f1220';
+      else if(t===TileType.FIELD){
+        const st=crops[y][x];
+        if(st===CROP_STAGE.BARE) fill='#6f522d';
+        else if(st===CROP_STAGE.PLOWED) fill='#8c6336';
+        else if(st===CROP_STAGE.GROWING){
+          const gp=growthProgress(x,y);
+          // richer gradient: early deep green → lush lime; sprayed shifts hue a bit
+          const from = sprayed[y][x] ? '#1d7a34' : '#175e2a';
+          const mid  = sprayed[y][x] ? '#28a54b' : '#2c8a3e';
+          const to   = sprayed[y][x] ? '#7cf58a' : '#68d86f';
+          const t1 = clamp01(gp*1.2); // a bit front-loaded
+          const col1 = lerpColor(from, mid, t1);
+          const col2 = lerpColor(mid,  to,  clamp01((gp-0.5)*2));
+          fill = gp<0.5 ? col1 : col2;
+        }
+        else if(st===CROP_STAGE.READY) fill='#c9b24a';
+      }
+      // apply daylight brightness
+      fill = brighten(fill, light);
+      ctx.fillStyle=fill; ctx.fillRect(x*TILE_SIZE,y*TILE_SIZE,TILE_SIZE,TILE_SIZE);
+      ctx.strokeStyle='rgba(0,0,0,.18)'; ctx.strokeRect(x*TILE_SIZE,y*TILE_SIZE,TILE_SIZE,TILE_SIZE);
+
+      // Snow overlay
+      if(getSnow(x,y)){ ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.fillRect(x*TILE_SIZE+4,y*TILE_SIZE+4,TILE_SIZE-8,TILE_SIZE-8); }
+
+      // Visual hints: spray window & urgency rings
+      if(tiles[y][x]===TileType.FIELD){ const st=crops[y][x]; if(st===CROP_STAGE.GROWING){ const gp=growthProgress(x,y); if(gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO){ ctx.strokeStyle='rgba(0,255,120,.85)'; ctx.lineWidth=2; ctx.strokeRect(x*TILE_SIZE+6,y*TILE_SIZE+6,TILE_SIZE-12,TILE_SIZE-12); } } else if(st===CROP_STAGE.READY){ const rp=readyProgress(x,y); if(rp>0.6){ ctx.strokeStyle='rgba(255,90,0,.85)'; ctx.lineWidth=2; ctx.strokeRect(x*TILE_SIZE+4,y*TILE_SIZE+4,TILE_SIZE-8,TILE_SIZE-8); } } }
+
+      if(hubSet.has(`${x},${y}`)){ ctx.lineWidth = 3; ctx.strokeStyle='rgba(0,255,208,0.9)'; ctx.strokeRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); ctx.fillStyle='rgba(0,255,208,0.08)'; ctx.fillRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); ctx.fillStyle = '#00e6be'; ctx.font = 'bold 18px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('H', x*TILE_SIZE+TILE_SIZE/2, y*TILE_SIZE+TILE_SIZE/2); }
+
+      if(x===selectedTile.x && y===selectedTile.y){ ctx.lineWidth=2; ctx.strokeStyle='#00ffff'; ctx.strokeRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); }
+    }
+  }
+}
+
+function drawQueueForSelected(){ const u = units[selectedUnit]; if(!u || !u.commands.length) return; ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,0,.9)'; ctx.setLineDash([4,4]); let prevX = u.x*TILE_SIZE + TILE_SIZE/2; let prevY = u.y*TILE_SIZE + TILE_SIZE/2; for(const c of u.commands){ const cx = c.tx*TILE_SIZE + TILE_SIZE/2; const cy = c.ty*TILE_SIZE + TILE_SIZE/2; ctx.beginPath(); ctx.moveTo(prevX,prevY); ctx.lineTo(cx,cy); ctx.stroke(); ctx.beginPath(); ctx.arc(cx,cy,6,0,Math.PI*2); ctx.stroke(); prevX=cx; prevY=cy; } ctx.setLineDash([]); }
+
+function drawUnits(){
+  for(let i=0;i<units.length;i++){
+    const u=units[i]; const px=u.x*TILE_SIZE, py=u.y*TILE_SIZE; const cx=px+TILE_SIZE/2, cy=py+TILE_SIZE/2;
+    if(u.type===UnitType.TRACTOR){
+      // Tractor: two large wheels + chassis + cab
+      ctx.fillStyle = u.state==='working' ? '#3bc0ff' : '#1f8fe0';
+      // wheels
+      ctx.beginPath(); ctx.arc(px+8, py+TILE_SIZE-7, 5, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px+TILE_SIZE-8, py+TILE_SIZE-7, 6, 0, Math.PI*2); ctx.fill();
+      // body
+      ctx.fillRect(px+6, py+8, TILE_SIZE-12, 10);
+      // cab
+      ctx.fillStyle='#eaeef7'; ctx.fillRect(px+10, py+4, TILE_SIZE-20, 8);
+    } else if(u.type===UnitType.HARVESTER){
+      // Harvester: wide header + body
+      ctx.fillStyle = u.state==='working' ? '#b9e15d' : '#9ad24a';
+      // header
+      ctx.fillRect(px+2, py+TILE_SIZE-10, TILE_SIZE-4, 4);
+      // body
+      ctx.fillRect(px+5, py+6, TILE_SIZE-10, TILE_SIZE-14);
+      // cab window
+      ctx.fillStyle='#f0f6ff'; ctx.fillRect(px+9, py+8, TILE_SIZE-18, 8);
+    } else if(u.type===UnitType.SPRAYER){
+      // Sprayer: tank + booms
+      ctx.fillStyle = u.state==='working' ? '#7cc7ff' : '#5aa9e6';
+      // tank (circle)
+      ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI*2); ctx.fill();
+      // booms
+      ctx.fillRect(px+4, cy-1, TILE_SIZE-8, 2);
+      ctx.fillRect(cx-1, py+4, 2, TILE_SIZE-8);
+    }
+    if(i===selectedUnit){ ctx.lineWidth=2; ctx.strokeStyle='#ffd700'; ctx.strokeRect(px+2,py+2,TILE_SIZE-4,TILE_SIZE-4); }
+  }
+}
+
+function drawSunOverlay(){
+  const {x,y,height} = sunPosition();
+  const grad = ctx.createRadialGradient(x,y,10, x,y, 140);
+  // Day glow is warm; at night we skip the glow and rely on dimming via tile brightness
+  const alpha = 0.12 * height;
+  grad.addColorStop(0, `rgba(255,240,180,${alpha})`);
+  grad.addColorStop(1, 'rgba(255,240,180,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawTiles();
+  const s = seasonFromMinutes(gameMinutes);
+  ctx.fillStyle = ['rgba(80,200,120,0.05)','rgba(255,200,80,0.05)','rgba(255,140,0,0.05)','rgba(180,220,255,0.08)'][s.seasonIndex];
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  drawSunOverlay();
+  drawQueueForSelected();
+  drawUnits();
+  moneySpan.textContent = Math.floor(money).toString();
+  renderUnitList();
+}
+
+/* ===== Persistence ===== */
+function saveGame(){ const save = { money, gameMinutes, tiles, crops, cropTimers, readyTimers, sprayed, units, nextUnitId, selectedUnit, snow, stonePicked, preset: presetSel.value }; try{ localStorage.setItem('farm_rts_save', JSON.stringify(save)); }catch(e){} }
+function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>units.push(u)); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; ensureGridDims(); return true; }catch(e){ return false; } }
+
+/* ===== Tests ===== */
+function assert(cond, msg){ if(!cond) throw new Error(msg); }
+function printResult(ok, msg){ const p=document.createElement('div'); p.className= ok? 'test-pass':'test-fail'; p.textContent=(ok?'✔ ':'✖ ')+msg; testResults.appendChild(p); }
+function clearResults(){ testResults.textContent=''; }
+function capacityNumbers(){
+  const tractorCap = Math.floor(GROWTH_TIME / (PLOW_TIME + SEED_TIME));
+  const sprayWindow = (SPRAY_BEST_TO - SPRAY_BEST_FROM) * GROWTH_TIME;
+  const sprayerCap = Math.floor(sprayWindow / SPRAY_TIME);
+  const harvesterCap = Math.floor(READY_WINDOW / HARVEST_TIME);
+  const perDayPlow = Math.floor(SHIFT_SECONDS_PER_INGAME_DAY / PLOW_TIME);
+  const perDaySeed = Math.floor(SHIFT_SECONDS_PER_INGAME_DAY / SEED_TIME);
+  const perDaySpray = Math.floor(SHIFT_SECONDS_PER_INGAME_DAY / SPRAY_TIME);
+  const perDayHarvest = Math.floor(SHIFT_SECONDS_PER_INGAME_DAY / HARVEST_TIME);
+  return {tractorCap, sprayerCap, harvesterCap, perDayPlow, perDaySeed, perDaySpray, perDayHarvest};
+}
+function runTests(){
+  clearResults();
+  try{
+    // Season math
+    const s0 = seasonFromMinutes(8*60); assert(s0.seasonName==='Spring' && s0.dayInSeason===1, 'Season start should be Spring, Day 1');
+    const sEndSpring = seasonFromMinutes((DAYS_PER_SEASON-1)*MINUTES_PER_DAY); assert(sEndSpring.seasonName==='Spring' && sEndSpring.dayInSeason===DAYS_PER_SEASON, 'End of Spring maps correctly');
+    const sSummer = seasonFromMinutes(DAYS_PER_SEASON*MINUTES_PER_DAY); assert(sSummer.seasonName==='Summer' && sSummer.dayInSeason===1, 'Summer begins after 4 days');
+    assert(seasonGrowthMult(3)===0, 'Winter growth should be 0');
+    assert(seasonDecayMult(3)>1, 'Winter decay is faster');
+    const hub = getHubSpawn(); assert(baseRows[hub.y][hub.x]==='H', 'Hub spawn should be on an H tile');
+
+    // Capacity targets: 50 per task per shift
+    const caps = capacityNumbers();
+    assert(caps.perDayPlow   >= 50, `Per-day plow capacity ≥50 (got ${caps.perDayPlow})`);
+    assert(caps.perDaySeed   >= 50, `Per-day seed capacity ≥50 (got ${caps.perDaySeed})`);
+    assert(caps.perDaySpray  >= 50, `Per-day spray capacity ≥50 (got ${caps.perDaySpray})`);
+    assert(caps.perDayHarvest>= 50, `Per-day harvest capacity ≥50 (got ${caps.perDayHarvest})`);
+    printResult(true,`Per-shift: P=${caps.perDayPlow}, Sd=${caps.perDaySeed}, Sp=${caps.perDaySpray}, Hv=${caps.perDayHarvest}`);
+
+    // Bounds-safety tests
+    assert(adviceFor(-1,0)==='Out of bounds', 'Advice returns OOB safely');
+    const dummy = createUnit(UnitType.TRACTOR,0,0); assert(tryStartWork(dummy,-1,0,'plow')===false, 'tryStartWork ignores OOB');
+
+    // Grid normalization test (simulate broken save)
+    const oldTiles = tiles; tiles = []; ensureGridDims(); assert(tiles[0][0]!==undefined, 'ensureGridDims rebuilds grid'); tiles = oldTiles;
+
+    printResult(true,'Core season, shift, capacity & safety tests passed');
+  }catch(e){ printResult(false, e.message); }
+}
+
+/* ===== Assisted Planner (QoL) ===== */
+let ASSISTED = false;
+function applyPreset(){ ASSISTED = (presetSel.value==='assist'); MOVE_DELAY = ASSISTED ? 0.22 : 0.25; planBtn.style.display = ASSISTED ? 'inline-block' : 'none'; }
+function nearestFirst(from, targets){ return targets.slice().sort((p,q)=> (Math.abs(from.x-p.x)+Math.abs(from.y-p.y)) - (Math.abs(from.x-q.x)+Math.abs(from.y-p.y))); }
+function listTilesWhere(pred){ const out=[]; for(let y=0;y<GRID_H;y++){ for(let x=0;x<GRID_W;x++){ if(pred(x,y)) out.push({x,y}); } } return out; }
+
+function planCycle(){ if(!ASSISTED) return; 
+  const tractors = units.filter(u=>u.type==='Tractor');
+  const sprayers = units.filter(u=>u.type==='Sprayer');
+  const harvesters = units.filter(u=>u.type==='Harvester');
+  const caps = capacityNumbers();
+  // Tractor planning: field-wide realism sequence
+  const bare = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.BARE);
+  const plowed = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.PLOWED);
+  tractors.forEach(t=>{ t.commands.length=0; });
+  tractors.forEach(t=>{ const p1=nearestFirst(t, bare).slice(0, Math.min(caps.perDayPlow, bare.length)); p1.forEach(pt=> t.commands.push({tx:pt.x,ty:pt.y,type:'plow'})); const p2=nearestFirst(t, plowed).slice(0, Math.min(caps.perDaySeed, plowed.length)); p2.forEach(pt=> t.commands.push({tx:pt.x,ty:pt.y,type:'seed'})); });
+  // Sprayers: only spray window
+  const growWindow = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.GROWING && ((()=>{const gp=growthProgress(x,y); return gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO;})()));
+  sprayers.forEach(s=>{ s.commands.length=0; const picks = nearestFirst(s, growWindow).slice(0, Math.min(caps.perDaySpray, growWindow.length)); picks.forEach(pt=> s.commands.push({tx:pt.x,ty:pt.y,type:'spray'})); });
+  // Harvesters: ready
+  const ready = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.READY);
+  harvesters.forEach(h=>{ h.commands.length=0; const picks = nearestFirst(h, ready).slice(0, Math.min(caps.perDayHarvest, ready.length)); picks.forEach(pt=> h.commands.push({tx:pt.x,ty:pt.y,type:'harvest'})); });
+  saveGame();
+}
+planBtn.addEventListener('click', planCycle);
+presetSel.addEventListener('change', ()=>{ applyPreset(); saveGame(); });
+
+/* ===== Main Loop ===== */
+let last = performance.now();
+function loop(now){ const dt = paused ? 0 : (now-last)/1000; last = now; if(!paused){ updateGameClock(dt); updateCrops(dt); updateUnits(dt); } draw(); if(Math.floor(now/3000)!==Math.floor((now-dt*1000)/3000)) saveGame(); requestAnimationFrame(loop); }
+
+/* ===== Init ===== */
+function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; initMap(true); initUnits(); selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); saveGame(); }
+function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); } last = performance.now(); requestAnimationFrame(loop); runTests(); }
+
+runTestsBtn.addEventListener('click', runTests);
+start();
+</script>
+</body>
+</html>
