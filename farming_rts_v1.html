@@ -58,6 +58,7 @@
       <button id="speed1Btn">1×</button>
       <button id="speed3Btn">3×</button>
       <button id="resetBtn" class="ghost">Reset Farm</button>
+      <button id="sleepBtn" class="ghost" title="Skip to the next morning">Sleep to 06:00</button>
       <label style="margin-left:8px;font-size:.85rem;display:flex;gap:6px;align-items:center;">
         Preset:
         <select id="preset">
@@ -263,6 +264,7 @@ const pauseBtn = document.getElementById('pauseBtn');
 const speed1Btn = document.getElementById('speed1Btn');
 const speed3Btn = document.getElementById('speed3Btn');
 const resetBtn = document.getElementById('resetBtn');
+const sleepBtn = document.getElementById('sleepBtn');
 const presetSel = document.getElementById('preset');
 const planBtn = document.getElementById('planBtn');
 const planScopeWrap = document.getElementById('planScopeWrap');
@@ -309,8 +311,29 @@ function initMap(newGame=false){
 const UnitType = { TRACTOR:'Tractor', HARVESTER:'Harvester', SPRAYER:'Sprayer' };
 const units = []; let nextUnitId = 1; let selectedUnit = 0;
 
-function createUnit(type,x,y){ return { id: nextUnitId++, type, x, y, moveCooldown:0, commands:[], action:null, actionTimer:0, workX:null, workY:null, state:'idle' }; }
-function initUnits(){ units.length=0; const hub=getHubSpawn(); units.push(createUnit(UnitType.TRACTOR, hub.x, hub.y)); selectedUnit=0; }
+function createUnit(type,x,y,opts={}){
+  return {
+    id: nextUnitId++,
+    type,
+    x,
+    y,
+    moveCooldown:0,
+    commands:[],
+    action:null,
+    actionTimer:0,
+    workX:null,
+    workY:null,
+    state:'idle',
+    isOwner: !!opts.isOwner,
+    alwaysActive: !!opts.alwaysActive
+  };
+}
+function initUnits(){
+  units.length=0;
+  const hub=getHubSpawn();
+  units.push(createUnit(UnitType.TRACTOR, hub.x, hub.y, {isOwner:true, alwaysActive:true}));
+  selectedUnit=0;
+}
 
 function unitCanDo(unit, action){
   if(action===ACTION.MOVE || action===ACTION.AUTO) return true;
@@ -324,22 +347,29 @@ function unitCanDo(unit, action){
 let money = 7000; let gameMinutes = 8*60; let paused=false; let timeScale=1;
 
 function withinShift(){ const minuteInDay=Math.floor(gameMinutes%MINUTES_PER_DAY); const hour=Math.floor(minuteInDay/60); return (hour>=SHIFT_START_H && hour<SHIFT_END_H); }
+function unitIsOnShift(u){ return u && u.alwaysActive ? true : withinShift(); }
 
-function updateGameClock(dt){
-  const simDt = dt * timeScale;
-  const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
-  gameMinutes += simDt * minutesPerRealSecond;
+function refreshHud(seasonInfo){
   const minutesPerDay = MINUTES_PER_DAY;
   const day = 1 + Math.floor(gameMinutes/minutesPerDay);
   const minuteInDay = Math.floor(gameMinutes%minutesPerDay);
   const hour = Math.floor(minuteInDay/60);
   const minute = minuteInDay%60;
-  daySpan.textContent = String(day);
-  timeSpan.textContent = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
-  const s = seasonFromMinutes(gameMinutes);
+  if(daySpan) daySpan.textContent = String(day);
+  if(timeSpan) timeSpan.textContent = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
+  const s = seasonInfo ?? seasonFromMinutes(gameMinutes);
   if(seasonLabel) seasonLabel.textContent = `${s.seasonName}, Day ${s.dayInSeason}`;
   if(shiftLabel) shiftLabel.textContent = withinShift()? 'On' : 'Off';
+}
+
+function updateGameClock(dt, opts={}){
+  const skipHud = opts.skipHud ?? false;
+  const simDt = dt * timeScale;
+  const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
+  gameMinutes += simDt * minutesPerRealSecond;
+  const s = seasonFromMinutes(gameMinutes);
   if(s.seasonIndex!==lastSeasonIndex){ onSeasonChanged(lastSeasonIndex, s.seasonIndex); lastSeasonIndex = s.seasonIndex; }
+  if(!skipHud) refreshHud(s);
 }
 
 function onSeasonChanged(prev, now){
@@ -404,7 +434,7 @@ function tryStartWork(u, tx, ty, action){
   if(action===ACTION.MOVE) return false;
 
   // Respect shift hours
-  if(!withinShift()) return false;
+  if(!unitIsOnShift(u)) return false;
 
   let chosen = action===ACTION.AUTO ? autoPickActionForTile(u, tx, ty) : action;
   if(!chosen) return false; if(!unitCanDo(u, chosen)) return false;
@@ -450,10 +480,11 @@ function finishAction(u){
 }
 
 function updateUnits(dt){
-  const simDt = dt*timeScale; const onShift = withinShift();
+  const simDt = dt*timeScale;
   for(const u of units){
-    if(u.actionTimer>0){ if(onShift){ u.actionTimer -= simDt; if(u.actionTimer<=0) finishAction(u); } continue; }
-    if(u.commands.length>0){ const cmd=u.commands[0]; const {tx,ty,type}=cmd; if(u.x===tx && u.y===ty){ if(onShift) tryStartWork(u, tx, ty, type); u.commands.shift(); } else { if(onShift){ u.moveCooldown -= simDt; if(u.moveCooldown<=0){ stepTowards(u, tx, ty); u.moveCooldown = MOVE_DELAY; u.state='moving'; } } } }
+    const active = unitIsOnShift(u);
+    if(u.actionTimer>0){ if(active){ u.actionTimer -= simDt; if(u.actionTimer<=0) finishAction(u); } continue; }
+    if(u.commands.length>0){ const cmd=u.commands[0]; const {tx,ty,type}=cmd; if(u.x===tx && u.y===ty){ if(active) tryStartWork(u, tx, ty, type); u.commands.shift(); } else { if(active){ u.moveCooldown -= simDt; if(u.moveCooldown<=0){ stepTowards(u, tx, ty); u.moveCooldown = MOVE_DELAY; u.state='moving'; } } } }
     else { if(u.state!=='idle') u.state='idle'; }
   }
 }
@@ -471,6 +502,19 @@ pauseBtn.onclick = ()=>{ paused=!paused; pauseBtn.textContent = paused?'Resume':
 speed1Btn.onclick = ()=> timeScale = 1;
 speed3Btn.onclick = ()=> timeScale = 3;
 resetBtn.onclick = ()=> { localStorage.removeItem('farm_rts_save'); startNewGame(); };
+sleepBtn.onclick = ()=>{
+  const minuteInDay = Math.floor(gameMinutes % MINUTES_PER_DAY);
+  const startOfDay = gameMinutes - minuteInDay;
+  let target = startOfDay + SHIFT_START_H*60;
+  if(gameMinutes >= target - 1e-6) target += MINUTES_PER_DAY;
+  const delta = target - gameMinutes;
+  if(delta <= 0) return;
+  fastForwardMinutes(delta);
+  gameMinutes = target;
+  refreshHud();
+  renderTileInfo();
+  saveGame();
+};
 
 function addMoneySafe(v){ money += v; if(money<0) money=0; }
 function spawnAtHub(type){ const hub = getHubSpawn(); const u = createUnit(type, hub.x, hub.y); units.push(u); selectedUnit = units.length-1; }
@@ -490,7 +534,7 @@ function renderUnitList(){
     card.className = 'unitCard'+(idx===selectedUnit?' selected':'');
     card.innerHTML = `
       <div class="unitHeader">
-        <div><strong>#${u.id}</strong> ${iconFor(u.type)} ${u.type}</div>
+        <div><strong>#${u.id}</strong> ${iconFor(u.type)} ${u.type} ${u.isOwner?'<span class="tag">Owner</span>':''}</div>
         <span class="tag">${u.state}</span>
       </div>
       <div style="margin-top:4px;font-size:.86rem;color:#bbb;">Pos: (${u.x},${u.y})</div>
@@ -620,7 +664,8 @@ function drawUnits(){
     const u=units[i]; const px=u.x*TILE_SIZE, py=u.y*TILE_SIZE; const cx=px+TILE_SIZE/2, cy=py+TILE_SIZE/2;
     if(u.type===UnitType.TRACTOR){
       // Tractor: two large wheels + chassis + cab
-      ctx.fillStyle = u.state==='working' ? '#3bc0ff' : '#1f8fe0';
+      const bodyColor = u.isOwner ? (u.state==='working' ? '#ff8b7d' : '#e0463f') : (u.state==='working' ? '#3bc0ff' : '#1f8fe0');
+      ctx.fillStyle = bodyColor;
       // wheels
       ctx.beginPath(); ctx.arc(px+8, py+TILE_SIZE-7, 5, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(px+TILE_SIZE-8, py+TILE_SIZE-7, 6, 0, Math.PI*2); ctx.fill();
@@ -676,7 +721,23 @@ function draw(){
 
 /* ===== Persistence ===== */
 function saveGame(){ const save = { money, gameMinutes, tiles, crops, cropTimers, readyTimers, sprayed, units, nextUnitId, selectedUnit, snow, stonePicked, preset: presetSel.value, planScope: planScopeSel ? planScopeSel.value : 'all' }; try{ localStorage.setItem('farm_rts_save', JSON.stringify(save)); }catch(e){} }
-function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>units.push(u)); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureGridDims(); return true; }catch(e){ return false; } }
+function ensureOwnerTractor(){
+  let owner = units.find(u=>u.isOwner && u.type===UnitType.TRACTOR);
+  if(!owner){
+    const firstTractor = units.find(u=>u.type===UnitType.TRACTOR);
+    if(firstTractor){
+      firstTractor.isOwner = true;
+      firstTractor.alwaysActive = true;
+      owner = firstTractor;
+    }
+  }
+  if(!owner){
+    const hub = getHubSpawn();
+    const replacement = createUnit(UnitType.TRACTOR, hub.x, hub.y, {isOwner:true, alwaysActive:true});
+    units.unshift(replacement);
+  }
+}
+function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>{ u.commands = u.commands || []; u.isOwner = !!u.isOwner; u.alwaysActive = !!u.alwaysActive; units.push(u); }); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureOwnerTractor(); ensureGridDims(); return true; }catch(e){ return false; } }
 
 /* ===== Tests ===== */
 function assert(cond, msg){ if(!cond) throw new Error(msg); }
@@ -809,9 +870,33 @@ presetSel.addEventListener('change', ()=>{ applyPreset(); saveGame(); });
 let last = performance.now();
 function loop(now){ const dt = paused ? 0 : (now-last)/1000; last = now; if(!paused){ updateGameClock(dt); updateCrops(dt); updateUnits(dt); } draw(); if(Math.floor(now/3000)!==Math.floor((now-dt*1000)/3000)) saveGame(); requestAnimationFrame(loop); }
 
+function fastForwardMinutes(minutes){
+  if(minutes<=0) return;
+  const prevPaused = paused;
+  const prevScale = timeScale;
+  paused = true;
+  timeScale = 1;
+  const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
+  let remaining = minutes;
+  const step = 0.5;
+  while(remaining > 1e-6){
+    const chunk = Math.min(step, remaining);
+    const dt = chunk / minutesPerRealSecond;
+    updateGameClock(dt, {skipHud:true});
+    updateCrops(dt);
+    updateUnits(dt);
+    remaining -= chunk;
+  }
+  timeScale = prevScale;
+  paused = prevPaused;
+  last = performance.now();
+  refreshHud();
+  draw();
+}
+
 /* ===== Init ===== */
-function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; initMap(true); initUnits(); selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); saveGame(); }
-function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); } last = performance.now(); requestAnimationFrame(loop); runTests(); }
+function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; initMap(true); initUnits(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); refreshHud(); saveGame(); }
+function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); ensureOwnerTractor(); refreshHud(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; } last = performance.now(); requestAnimationFrame(loop); runTests(); }
 
 runTestsBtn.addEventListener('click', runTests);
 start();
