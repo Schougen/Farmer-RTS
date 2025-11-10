@@ -66,6 +66,16 @@
         </select>
       </label>
       <button id="planBtn" class="ghost" title="Auto-queue a full cycle for available machines">Plan Cycle</button>
+      <label id="planScopeWrap" style="margin-left:4px;font-size:.85rem;display:flex;gap:6px;align-items:center;">
+        Jobs:
+        <select id="planScope">
+          <option value="all">All jobs</option>
+          <option value="plow">Plow only</option>
+          <option value="seed">Seed only</option>
+          <option value="spray">Spray only</option>
+          <option value="harvest">Harvest only</option>
+        </select>
+      </label>
     </div>
     <div id="shop">
       <button id="buyTractorBtn">Buy 🚜 Tractor (2000)</button>
@@ -255,6 +265,8 @@ const speed3Btn = document.getElementById('speed3Btn');
 const resetBtn = document.getElementById('resetBtn');
 const presetSel = document.getElementById('preset');
 const planBtn = document.getElementById('planBtn');
+const planScopeWrap = document.getElementById('planScopeWrap');
+const planScopeSel = document.getElementById('planScope');
 const buyTractorBtn = document.getElementById('buyTractorBtn');
 const buyHarvesterBtn = document.getElementById('buyHarvesterBtn');
 const buySprayerBtn = document.getElementById('buySprayerBtn');
@@ -663,8 +675,8 @@ function draw(){
 }
 
 /* ===== Persistence ===== */
-function saveGame(){ const save = { money, gameMinutes, tiles, crops, cropTimers, readyTimers, sprayed, units, nextUnitId, selectedUnit, snow, stonePicked, preset: presetSel.value }; try{ localStorage.setItem('farm_rts_save', JSON.stringify(save)); }catch(e){} }
-function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>units.push(u)); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; ensureGridDims(); return true; }catch(e){ return false; } }
+function saveGame(){ const save = { money, gameMinutes, tiles, crops, cropTimers, readyTimers, sprayed, units, nextUnitId, selectedUnit, snow, stonePicked, preset: presetSel.value, planScope: planScopeSel ? planScopeSel.value : 'all' }; try{ localStorage.setItem('farm_rts_save', JSON.stringify(save)); }catch(e){} }
+function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>units.push(u)); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureGridDims(); return true; }catch(e){ return false; } }
 
 /* ===== Tests ===== */
 function assert(cond, msg){ if(!cond) throw new Error(msg); }
@@ -713,29 +725,69 @@ function runTests(){
 
 /* ===== Assisted Planner (QoL) ===== */
 let ASSISTED = false;
-function applyPreset(){ ASSISTED = (presetSel.value==='assist'); MOVE_DELAY = ASSISTED ? 0.22 : 0.25; planBtn.style.display = ASSISTED ? 'inline-block' : 'none'; }
+function applyPreset(){ ASSISTED = (presetSel.value==='assist'); MOVE_DELAY = ASSISTED ? 0.22 : 0.25; planBtn.style.display = ASSISTED ? 'inline-block' : 'none'; if(planScopeWrap) planScopeWrap.style.display = ASSISTED ? 'flex' : 'none'; if(planScopeSel) planScopeSel.disabled = !ASSISTED; }
 function nearestFirst(from, targets){ return targets.slice().sort((p,q)=> (Math.abs(from.x-p.x)+Math.abs(from.y-p.y)) - (Math.abs(from.x-q.x)+Math.abs(from.y-p.y))); }
 function listTilesWhere(pred){ const out=[]; for(let y=0;y<GRID_H;y++){ for(let x=0;x<GRID_W;x++){ if(pred(x,y)) out.push({x,y}); } } return out; }
 
-function planCycle(){ if(!ASSISTED) return; 
-  const tractors = units.filter(u=>u.type==='Tractor');
-  const sprayers = units.filter(u=>u.type==='Sprayer');
-  const harvesters = units.filter(u=>u.type==='Harvester');
+function assignUniqueTasks(units, tasks, perUnitLimit, actionType){
+  if(!units.length || !tasks.length || perUnitLimit<=0) return;
+  const remaining = tasks.slice();
+  for(const unit of units){
+    if(!remaining.length) break;
+    const ordered = nearestFirst(unit, remaining);
+    let given = 0;
+    for(const pt of ordered){
+      if(given>=perUnitLimit) break;
+      const idx = remaining.findIndex(p=>p.x===pt.x && p.y===pt.y);
+      if(idx===-1) continue;
+      remaining.splice(idx,1);
+      unit.commands.push({tx:pt.x, ty:pt.y, type:actionType});
+      given++;
+      if(!remaining.length) break;
+    }
+  }
+}
+
+function planCycle(){ if(!ASSISTED) return;
+  const scope = planScopeSel ? planScopeSel.value : 'all';
+  const planPlow = scope==='all' || scope==='plow';
+  const planSeed = scope==='all' || scope==='seed';
+  const planSpray = scope==='all' || scope==='spray';
+  const planHarvest = scope==='all' || scope==='harvest';
+
+  const tractors = units.filter(u=>u.type===UnitType.TRACTOR);
+  const sprayers = units.filter(u=>u.type===UnitType.SPRAYER);
+  const harvesters = units.filter(u=>u.type===UnitType.HARVESTER);
   const caps = capacityNumbers();
-  // Tractor planning: field-wide realism sequence
-  const bare = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.BARE);
-  const plowed = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.PLOWED);
-  tractors.forEach(t=>{ t.commands.length=0; });
-  tractors.forEach(t=>{ const p1=nearestFirst(t, bare).slice(0, Math.min(caps.perDayPlow, bare.length)); p1.forEach(pt=> t.commands.push({tx:pt.x,ty:pt.y,type:'plow'})); const p2=nearestFirst(t, plowed).slice(0, Math.min(caps.perDaySeed, plowed.length)); p2.forEach(pt=> t.commands.push({tx:pt.x,ty:pt.y,type:'seed'})); });
-  // Sprayers: only spray window
-  const growWindow = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.GROWING && ((()=>{const gp=growthProgress(x,y); return gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO;})()));
-  sprayers.forEach(s=>{ s.commands.length=0; const picks = nearestFirst(s, growWindow).slice(0, Math.min(caps.perDaySpray, growWindow.length)); picks.forEach(pt=> s.commands.push({tx:pt.x,ty:pt.y,type:'spray'})); });
-  // Harvesters: ready
-  const ready = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.READY);
-  harvesters.forEach(h=>{ h.commands.length=0; const picks = nearestFirst(h, ready).slice(0, Math.min(caps.perDayHarvest, ready.length)); picks.forEach(pt=> h.commands.push({tx:pt.x,ty:pt.y,type:'harvest'})); });
+
+  if(planPlow || planSeed){
+    tractors.forEach(t=>{ t.commands.length=0; });
+    if(planPlow){
+      const bare = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.BARE);
+      assignUniqueTasks(tractors, bare, caps.perDayPlow, ACTION.PLOW);
+    }
+    if(planSeed){
+      const plowed = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.PLOWED);
+      assignUniqueTasks(tractors, plowed, caps.perDaySeed, ACTION.SEED);
+    }
+  }
+
+  if(planSpray){
+    sprayers.forEach(s=>{ s.commands.length=0; });
+    const growWindow = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.GROWING && ((()=>{const gp=growthProgress(x,y); return gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO;})()));
+    assignUniqueTasks(sprayers, growWindow, caps.perDaySpray, ACTION.SPRAY);
+  }
+
+  if(planHarvest){
+    harvesters.forEach(h=>{ h.commands.length=0; });
+    const ready = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.READY);
+    assignUniqueTasks(harvesters, ready, caps.perDayHarvest, ACTION.HARVEST);
+  }
+
   saveGame();
 }
 planBtn.addEventListener('click', planCycle);
+if(planScopeSel) planScopeSel.addEventListener('change', ()=>{ saveGame(); });
 presetSel.addEventListener('change', ()=>{ applyPreset(); saveGame(); });
 
 /* ===== Main Loop ===== */
