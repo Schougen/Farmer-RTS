@@ -6,7 +6,7 @@
 <style>
   :root { --bg:#111; --panel:#1b1b1b; --panel2:#222; --line:#333; --accent:#2f7dd8; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:#eee; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif; display:grid; grid-template-columns: 300px 1fr; grid-template-rows:auto auto 1fr; gap:8px; }
+  body { margin:0; background:var(--bg); color:#eee; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif; display:grid; grid-template-columns: 300px 1fr; grid-template-rows:auto auto 1fr; gap:8px; min-height:100vh; }
   header { grid-column:1 / -1; padding:10px 12px; }
   h1 { margin:0; font-size:1.15rem; letter-spacing:.04em; text-transform:uppercase; }
   #hud { grid-column:2 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:0 12px 6px; }
@@ -27,10 +27,10 @@
   .unitHeader { display:flex; justify-content:space-between; align-items:center; }
   .tag { font-size:.75rem; padding:2px 6px; border-radius:8px; background:#444; }
   .unitCard.selected { outline:2px solid #ffd700; }
-  .queueList { margin:6px 0 0; padding-left:16px; font-size:.85rem; color:#ddd; }
-  #boardWrap { grid-column:2; grid-row:3; display:flex; justify-content:center; padding:8px 12px 16px; }
-  #gameContainer { background:#000; padding:10px; border-radius:16px; box-shadow:0 0 20px rgba(0,0,0,.6); height:max-content; }
-  canvas { border-radius:8px; display:block; background:#223322; }
+  .queueList { margin:6px 0 0; padding-left:16px; font-size:.85rem; color:#ddd; max-height:160px; overflow:auto; padding-right:6px; }
+  #boardWrap { grid-column:2; grid-row:3; display:flex; justify-content:center; align-items:center; padding:8px 12px 16px; }
+  #gameContainer { background:#000; padding:10px; border-radius:16px; box-shadow:0 0 20px rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; }
+  canvas { border-radius:8px; display:block; background:#223322; width:100%; height:100%; }
   details { grid-column:2; color:#ccc; margin:0 12px 8px; }
   summary { cursor:pointer; font-weight:600; }
   .test-pass { color:#7CFC00; }
@@ -283,6 +283,9 @@ const tileKV = document.getElementById('tileKV');
 const runTestsBtn = document.getElementById('runTestsBtn');
 const testResults = document.getElementById('testResults');
 
+const boardWrap = document.getElementById('boardWrap');
+const gameContainer = document.getElementById('gameContainer');
+const howToDetails = document.querySelector('details');
 const modeBar = document.getElementById('modes');
 let currentMode = ACTION.AUTO;
 
@@ -342,7 +345,8 @@ function createUnit(type,x,y,opts={}){
     isOwner: !!opts.isOwner,
     alwaysActive: !!opts.alwaysActive,
     idleMinutes:0,
-    restTarget:null
+    restTarget:null,
+    lastShiftState: opts.alwaysActive ? true : withinShift()
   };
 }
 function initUnits(){
@@ -510,6 +514,78 @@ function findNearestHouse(u, opts={}){
   return findNearestTileOfType(u, new Set([TileType.HOUSE]), opts);
 }
 
+function findParkingNearHouse(house, u){
+  if(!house) return null;
+  const maxDist = 8;
+  const visited = new Set();
+  const queue = [{x:house.x, y:house.y, dist:0}];
+  visited.add(`${house.x},${house.y}`);
+  while(queue.length){
+    const current = queue.shift();
+    if(current.dist >= maxDist) continue;
+    const nextDist = current.dist + 1;
+    const neighbors = [
+      {x:current.x+1, y:current.y},
+      {x:current.x-1, y:current.y},
+      {x:current.x, y:current.y+1},
+      {x:current.x, y:current.y-1}
+    ];
+    for(const nb of neighbors){
+      const key = `${nb.x},${nb.y}`;
+      if(visited.has(key)) continue;
+      visited.add(key);
+      if(!inBounds(nb.x, nb.y)) continue;
+      const tile = getTile(nb.x, nb.y);
+      if(tile===TileType.SILO || tile===TileType.HOUSE) continue;
+      const open = !isOccupied(nb.x, nb.y, u) && !isTileReserved(nb.x, nb.y, 'shelter', u);
+      if(open) return nb;
+      queue.push({x:nb.x, y:nb.y, dist:nextDist});
+    }
+  }
+  return null;
+}
+
+function sendUnitHome(u){
+  if(!u || u.alwaysActive) return false;
+  const hereTile = getTile(u.x, u.y);
+  if(hereTile===TileType.HOUSE && !isOccupied(u.x, u.y, u)){
+    u.restTarget = {x:u.x, y:u.y, kind:'house'};
+    return true;
+  }
+  removeRestCommands(u);
+  u.restTarget = null;
+  const preferredHouse = findNearestHouse(u, {avoidReserved:true, reserveKind:'house'});
+  if(preferredHouse && !isOccupied(preferredHouse.x, preferredHouse.y, u)){
+    enqueueCommand(u, {tx:preferredHouse.x, ty:preferredHouse.y, type:ACTION.MOVE, meta:'rest', restKind:'house'});
+    return true;
+  }
+  const fallbackHouse = preferredHouse || findNearestHouse(u, {avoidReserved:false});
+  if(fallbackHouse){
+    const parking = findParkingNearHouse(fallbackHouse, u);
+    if(parking){
+      enqueueCommand(u, {tx:parking.x, ty:parking.y, type:ACTION.MOVE, meta:'rest', restKind:'shelter'});
+      return true;
+    }
+  }
+  return false;
+}
+
+function handleShiftEnded(u){
+  if(!u || u.alwaysActive) return;
+  if(u.actionTimer>0){
+    u.actionTimer = 0;
+    u.action = null;
+    u.workX = null;
+    u.workY = null;
+  }
+  u.state = 'idle';
+  u.moveCooldown = 0;
+  u.commands.length = 0;
+  u.restTarget = null;
+  u.idleMinutes = Math.max(u.idleMinutes ?? 0, IDLE_TO_SHELTER_MINUTES);
+  sendUnitHome(u);
+}
+
 function getTile(x,y){ return inBounds(x,y) ? tiles[y][x] : null; }
 function getStage(x,y){ return inBounds(x,y) ? crops[y][x] : CROP_STAGE.NONE; }
 function getSnow(x,y){ return inBounds(x,y) ? snow[y][x] : false; }
@@ -601,6 +677,8 @@ function maybeSendToRest(u){
     return;
   }
 
+  const headingToHouse = u.commands.some(c=>c.meta==='rest' && restKindsMatch(c.restKind||null, 'house'));
+  const targetingHouse = u.restTarget && restKindsMatch(u.restTarget.kind||null, 'house');
   const roadDue = u.idleMinutes >= IDLE_TO_ROAD_MINUTES;
   if(!roadDue) return;
 
@@ -623,6 +701,7 @@ function maybeSendToRest(u){
     }
   }
 
+  if(headingToHouse || targetingHouse) return;
   if(onRoad){
     u.restTarget = {x:u.x, y:u.y, kind:'road'};
     return;
@@ -668,6 +747,11 @@ function updateUnits(dt){
     if(u.idleMinutes===undefined) u.idleMinutes=0;
     if(u.restTarget===undefined) u.restTarget=null;
     const active = unitIsOnShift(u);
+    if(u.lastShiftState===undefined) u.lastShiftState = active;
+    if(!active && u.lastShiftState){
+      handleShiftEnded(u);
+    }
+    u.lastShiftState = active;
 
     if(u.actionTimer>0){
       if(active){
@@ -735,6 +819,7 @@ function updateUnits(dt){
 let isPanning = false;
 let panStart = {x:0, y:0};
 let panOrigin = {x:0, y:0};
+let queueDrag = null;
 
 canvas.style.cursor = 'grab';
 
@@ -759,23 +844,63 @@ canvas.addEventListener('mousedown', (e)=>{
     renderTileInfo();
   }
   else if(e.button===2){
+    queueDrag = null;
     if(selectedUnit>=0 && selectedUnit<units.length){
       const u=units[selectedUnit];
       const append = e.shiftKey;
       const type = currentMode;
       if(!append){ u.commands.length=0; u.restTarget=null; }
-      if(inBounds(tx,ty)) enqueueCommand(u, {tx,ty,type});
+      if(inBounds(tx,ty)){
+        enqueueCommand(u, {tx,ty,type});
+        queueDrag = { unit:u, type, visited:new Set([`${tx},${ty}`]), last:{tx, ty} };
+      }
     }
   }
 });
 
 canvas.addEventListener('mousemove', (e)=>{
-  if(!isPanning) return;
-  const dx = (e.clientX - panStart.x) / viewScale;
-  const dy = (e.clientY - panStart.y) / viewScale;
-  viewOffsetX = panOrigin.x - dx;
-  viewOffsetY = panOrigin.y - dy;
-  clampView();
+  if(isPanning){
+    const dx = (e.clientX - panStart.x) / viewScale;
+    const dy = (e.clientY - panStart.y) / viewScale;
+    viewOffsetX = panOrigin.x - dx;
+    viewOffsetY = panOrigin.y - dy;
+    clampView();
+  }
+
+  if(queueDrag){
+    if(!(e.buttons & 2)){
+      endQueueDrag();
+      return;
+    }
+    const {tx, ty} = eventToTile(e);
+    if(!inBounds(tx,ty)) return;
+    const last = queueDrag.last;
+    if(!last){
+      const key = `${tx},${ty}`;
+      if(!queueDrag.visited.has(key)){
+        queueDrag.visited.add(key);
+        enqueueCommand(queueDrag.unit, {tx,ty,type:queueDrag.type});
+      }
+      queueDrag.last = {tx, ty};
+      return;
+    }
+    if(last.tx===tx && last.ty===ty) return;
+    let cx = last.tx;
+    let cy = last.ty;
+    const stepX = Math.sign(tx - cx);
+    const stepY = Math.sign(ty - cy);
+    while(cx !== tx || cy !== ty){
+      if(cx !== tx) cx += stepX;
+      if(cy !== ty) cy += stepY;
+      if(!inBounds(cx,cy)) continue;
+      const key = `${cx},${cy}`;
+      if(!queueDrag.visited.has(key)){
+        queueDrag.visited.add(key);
+        enqueueCommand(queueDrag.unit, {tx:cx,ty:cy,type:queueDrag.type});
+      }
+    }
+    queueDrag.last = {tx, ty};
+  }
 });
 
 function endPan(){
@@ -784,9 +909,18 @@ function endPan(){
   canvas.style.cursor = 'grab';
 }
 
+function endQueueDrag(){
+  if(!queueDrag) return;
+  queueDrag = null;
+  saveGame();
+}
+
 canvas.addEventListener('mouseup', endPan);
 canvas.addEventListener('mouseleave', endPan);
 window.addEventListener('mouseup', endPan);
+canvas.addEventListener('mouseup', endQueueDrag);
+canvas.addEventListener('mouseleave', endQueueDrag);
+window.addEventListener('mouseup', endQueueDrag);
 
 canvas.addEventListener('wheel', (e)=>{
   e.preventDefault();
@@ -954,8 +1088,12 @@ function screenToWorld(mx, my){
 
 function eventToTile(e){
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
+  const cssX = e.clientX - rect.left;
+  const cssY = e.clientY - rect.top;
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = cssX * scaleX;
+  const my = cssY * scaleY;
   const {wx, wy} = screenToWorld(mx, my);
   return {
     tx: Math.floor(wx / TILE_SIZE),
@@ -968,6 +1106,30 @@ function eventToTile(e){
 }
 
 clampView();
+
+function resizeCanvasViewport(){
+  if(!boardWrap || !gameContainer) return;
+  const rect = boardWrap.getBoundingClientRect();
+  const margin = 16;
+  const padding = 20;
+  const availableWidth = Math.max(padding + 200, window.innerWidth - rect.left - margin);
+  const availableHeight = Math.max(padding + 200, window.innerHeight - rect.top - margin);
+  const innerWidth = availableWidth - padding;
+  const innerHeight = availableHeight - padding;
+  const aspect = canvas.width / canvas.height;
+  let targetInnerWidth = innerWidth;
+  let targetInnerHeight = targetInnerWidth / aspect;
+  if(targetInnerHeight > innerHeight){
+    targetInnerHeight = innerHeight;
+    targetInnerWidth = targetInnerHeight * aspect;
+  }
+  targetInnerWidth = Math.min(targetInnerWidth, canvas.width);
+  targetInnerHeight = Math.min(targetInnerHeight, canvas.height);
+  gameContainer.style.width = `${targetInnerWidth + padding}px`;
+  gameContainer.style.height = `${targetInnerHeight + padding}px`;
+  canvas.style.width = `${targetInnerWidth}px`;
+  canvas.style.height = `${targetInnerHeight}px`;
+}
 
 /* ===== Rendering ===== */
 function drawTiles(){
@@ -1126,7 +1288,7 @@ function ensureOwnerTractor(){
     units.unshift(replacement);
   }
 }
-  function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>{ u.commands = u.commands || []; u.isOwner = !!u.isOwner; u.alwaysActive = !!u.alwaysActive; u.idleMinutes = u.idleMinutes ?? 0; u.restTarget = null; units.push(u); }); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureOwnerTractor(); ensureGridDims(); return true; }catch(e){ return false; } }
+  function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>{ u.commands = u.commands || []; u.isOwner = !!u.isOwner; u.alwaysActive = !!u.alwaysActive; u.idleMinutes = u.idleMinutes ?? 0; u.restTarget = null; u.lastShiftState = u.alwaysActive ? true : withinShift(); units.push(u); }); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureOwnerTractor(); ensureGridDims(); return true; }catch(e){ return false; } }
 
 /* ===== Tests ===== */
 function assert(cond, msg){ if(!cond) throw new Error(msg); }
@@ -1314,6 +1476,11 @@ function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeSca
 function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); ensureOwnerTractor(); clampView(); refreshHud(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; } last = performance.now(); requestAnimationFrame(loop); runTests(); }
 
 runTestsBtn.addEventListener('click', runTests);
+window.addEventListener('resize', ()=>{ requestAnimationFrame(resizeCanvasViewport); });
+if(howToDetails){
+  howToDetails.addEventListener('toggle', ()=>{ requestAnimationFrame(resizeCanvasViewport); });
+}
+requestAnimationFrame(resizeCanvasViewport);
 start();
 </script>
 </body>
