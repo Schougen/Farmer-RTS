@@ -109,6 +109,7 @@
     <ul>
       <li><b>H = Farm Hub</b> — high-contrast tile(s) where <b>new equipment spawns</b>.</li>
       <li><b>Left-click</b> a tile for info or a unit to select it. <b>Right-click</b> to issue an order. <b>Shift+Right-click</b> queues.</li>
+      <li>Use the mouse wheel to <b>zoom</b>. Middle-drag (or hold <b>Alt</b> + left-drag) to <b>pan</b> the map.</li>
       <li>Start by creating fields (mode = <b>Field</b>, use a Tractor on grass). Then <b>Plow → Seed → Spray → Harvest</b>.</li>
       <li>Spray early/mid Growing for a bonus. Ready crops decay if ignored.</li>
       <li>Auto-save is enabled. Use <b>Reset Farm</b> to wipe progress.</li>
@@ -287,6 +288,15 @@ let currentMode = ACTION.AUTO;
 
 canvas.width = GRID_W * TILE_SIZE;
 canvas.height = GRID_H * TILE_SIZE;
+
+const WORLD_W = GRID_W * TILE_SIZE;
+const WORLD_H = GRID_H * TILE_SIZE;
+
+let viewScale = 1;
+let viewOffsetX = 0;
+let viewOffsetY = 0;
+const MIN_VIEW_SCALE = 0.6;
+const MAX_VIEW_SCALE = 2.5;
 
 let tiles = [], crops = [], cropTimers = [], readyTimers = [], sprayed = [];
 let snow = [], stonePicked = [];
@@ -722,9 +732,32 @@ function updateUnits(dt){
 }
 
 /* ===== Input ===== */
+let isPanning = false;
+let panStart = {x:0, y:0};
+let panOrigin = {x:0, y:0};
+
+canvas.style.cursor = 'grab';
+
 canvas.addEventListener('mousedown', (e)=>{
-  const rect = canvas.getBoundingClientRect(); const mx = e.clientX - rect.left; const my = e.clientY - rect.top; const tx = Math.floor(mx / TILE_SIZE); const ty = Math.floor(my / TILE_SIZE);
-  if(e.button===0){ let found=-1; for(let i=0;i<units.length;i++){ if(units[i].x===tx && units[i].y===ty){ found=i; break; } } if(found!==-1){ selectedUnit = found; } selectedTile = {x:tx, y:ty}; renderTileInfo(); }
+  if(e.button===1 || (e.button===0 && e.altKey)){
+    isPanning = true;
+    panStart = {x:e.clientX, y:e.clientY};
+    panOrigin = {x:viewOffsetX, y:viewOffsetY};
+    canvas.style.cursor = 'grabbing';
+    e.preventDefault();
+    return;
+  }
+
+  const {tx, ty} = eventToTile(e);
+  if(e.button===0){
+    let found=-1;
+    for(let i=0;i<units.length;i++){
+      if(units[i].x===tx && units[i].y===ty){ found=i; break; }
+    }
+    if(found!==-1){ selectedUnit = found; }
+    selectedTile = {x:tx, y:ty};
+    renderTileInfo();
+  }
   else if(e.button===2){
     if(selectedUnit>=0 && selectedUnit<units.length){
       const u=units[selectedUnit];
@@ -735,6 +768,42 @@ canvas.addEventListener('mousedown', (e)=>{
     }
   }
 });
+
+canvas.addEventListener('mousemove', (e)=>{
+  if(!isPanning) return;
+  const dx = (e.clientX - panStart.x) / viewScale;
+  const dy = (e.clientY - panStart.y) / viewScale;
+  viewOffsetX = panOrigin.x - dx;
+  viewOffsetY = panOrigin.y - dy;
+  clampView();
+});
+
+function endPan(){
+  if(!isPanning) return;
+  isPanning = false;
+  canvas.style.cursor = 'grab';
+}
+
+canvas.addEventListener('mouseup', endPan);
+canvas.addEventListener('mouseleave', endPan);
+window.addEventListener('mouseup', endPan);
+
+canvas.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const point = eventToTile(e);
+  const prevScale = viewScale;
+  const zoomFactor = Math.exp(-e.deltaY * 0.001);
+  viewScale = clamp(viewScale * zoomFactor, MIN_VIEW_SCALE, MAX_VIEW_SCALE);
+  if(viewScale === prevScale) return;
+  const mx = point.mx;
+  const my = point.my;
+  const worldX = point.wx;
+  const worldY = point.wy;
+  viewOffsetX = worldX - (mx / viewScale);
+  viewOffsetY = worldY - (my / viewScale);
+  clampView();
+}, {passive:false});
+
 canvas.oncontextmenu = (e)=> e.preventDefault();
 
 /* ===== UI ===== */
@@ -839,6 +908,7 @@ function renderTileInfo(){
 
 /* ===== Color & lighting helpers ===== */
 function clamp01(v){ return Math.max(0, Math.min(1, v)); }
+function clamp(v, min, max){ return Math.max(min, Math.min(max, v)); }
 function hexToRgb(hex){ hex = hex.replace('#',''); if(hex.length===3){ hex = hex.split('').map(c=>c+c).join(''); } const num = parseInt(hex,16); return {r:(num>>16)&255, g:(num>>8)&255, b:num&255}; }
 function rgbToHex(r,g,b){ const n=(r<<16)|(g<<8)|b; return '#'+n.toString(16).padStart(6,'0'); }
 function lerp(a,b,t){ return a + (b-a)*t; }
@@ -858,11 +928,46 @@ function dayLightFactor(){
 function sunPosition(){
   const minuteInDay = Math.floor(gameMinutes%MINUTES_PER_DAY);
   const h = minuteInDay/60; // 0..24
-  const x = (h/24)*canvas.width;
+  const x = (h/24)*WORLD_W;
   const height = Math.sin(Math.PI * clamp01((h-6)/12)); // 0 at 6 & 18, 1 at 12
-  const y = (1-height)*canvas.height*0.7 + canvas.height*0.05; // arc over top third
+  const y = (1-height)*WORLD_H*0.7 + WORLD_H*0.05; // arc over top third
   return {x, y, height: clamp01(height)};
 }
+
+function clampView(){
+  const viewW = canvas.width / viewScale;
+  const viewH = canvas.height / viewScale;
+  const maxX = Math.max(0, WORLD_W - viewW);
+  const maxY = Math.max(0, WORLD_H - viewH);
+  const minX = maxX===0 ? -(viewW - WORLD_W)/2 : 0;
+  const minY = maxY===0 ? -(viewH - WORLD_H)/2 : 0;
+  viewOffsetX = clamp(viewOffsetX, minX, maxX);
+  viewOffsetY = clamp(viewOffsetY, minY, maxY);
+}
+
+function screenToWorld(mx, my){
+  return {
+    wx: viewOffsetX + mx / viewScale,
+    wy: viewOffsetY + my / viewScale
+  };
+}
+
+function eventToTile(e){
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const {wx, wy} = screenToWorld(mx, my);
+  return {
+    tx: Math.floor(wx / TILE_SIZE),
+    ty: Math.floor(wy / TILE_SIZE),
+    wx,
+    wy,
+    mx,
+    my
+  };
+}
+
+clampView();
 
 /* ===== Rendering ===== */
 function drawTiles(){
@@ -900,16 +1005,39 @@ function drawTiles(){
       if(getSnow(x,y)){ ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.fillRect(x*TILE_SIZE+4,y*TILE_SIZE+4,TILE_SIZE-8,TILE_SIZE-8); }
 
       // Visual hints: spray window & urgency rings
-      if(tiles[y][x]===TileType.FIELD){ const st=crops[y][x]; if(st===CROP_STAGE.GROWING){ const gp=growthProgress(x,y); if(gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO){ ctx.strokeStyle='rgba(0,255,120,.85)'; ctx.lineWidth=2; ctx.strokeRect(x*TILE_SIZE+6,y*TILE_SIZE+6,TILE_SIZE-12,TILE_SIZE-12); } } else if(st===CROP_STAGE.READY){ const rp=readyProgress(x,y); if(rp>0.6){ ctx.strokeStyle='rgba(255,90,0,.85)'; ctx.lineWidth=2; ctx.strokeRect(x*TILE_SIZE+4,y*TILE_SIZE+4,TILE_SIZE-8,TILE_SIZE-8); } } }
+      if(tiles[y][x]===TileType.FIELD){ const st=crops[y][x]; if(st===CROP_STAGE.GROWING){ const gp=growthProgress(x,y); if(gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO){ ctx.strokeStyle='rgba(0,255,120,.85)'; ctx.lineWidth=2 / viewScale; ctx.strokeRect(x*TILE_SIZE+6,y*TILE_SIZE+6,TILE_SIZE-12,TILE_SIZE-12); } } else if(st===CROP_STAGE.READY){ const rp=readyProgress(x,y); if(rp>0.6){ ctx.strokeStyle='rgba(255,90,0,.85)'; ctx.lineWidth=2 / viewScale; ctx.strokeRect(x*TILE_SIZE+4,y*TILE_SIZE+4,TILE_SIZE-8,TILE_SIZE-8); } } }
 
-      if(hubSet.has(`${x},${y}`)){ ctx.lineWidth = 3; ctx.strokeStyle='rgba(0,255,208,0.9)'; ctx.strokeRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); ctx.fillStyle='rgba(0,255,208,0.08)'; ctx.fillRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); ctx.fillStyle = '#00e6be'; ctx.font = 'bold 18px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('H', x*TILE_SIZE+TILE_SIZE/2, y*TILE_SIZE+TILE_SIZE/2); }
+      if(hubSet.has(`${x},${y}`)){ ctx.lineWidth = 3 / viewScale; ctx.strokeStyle='rgba(0,255,208,0.9)'; ctx.strokeRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); ctx.fillStyle='rgba(0,255,208,0.08)'; ctx.fillRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); ctx.fillStyle = '#00e6be'; ctx.font = 'bold 18px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('H', x*TILE_SIZE+TILE_SIZE/2, y*TILE_SIZE+TILE_SIZE/2); }
 
-      if(x===selectedTile.x && y===selectedTile.y){ ctx.lineWidth=2; ctx.strokeStyle='#00ffff'; ctx.strokeRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); }
+      if(x===selectedTile.x && y===selectedTile.y){ ctx.lineWidth=2 / viewScale; ctx.strokeStyle='#00ffff'; ctx.strokeRect(x*TILE_SIZE+2,y*TILE_SIZE+2,TILE_SIZE-4,TILE_SIZE-4); }
     }
   }
 }
 
-function drawQueueForSelected(){ const u = units[selectedUnit]; if(!u || !u.commands.length) return; ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,0,.9)'; ctx.setLineDash([4,4]); let prevX = u.x*TILE_SIZE + TILE_SIZE/2; let prevY = u.y*TILE_SIZE + TILE_SIZE/2; for(const c of u.commands){ const cx = c.tx*TILE_SIZE + TILE_SIZE/2; const cy = c.ty*TILE_SIZE + TILE_SIZE/2; ctx.beginPath(); ctx.moveTo(prevX,prevY); ctx.lineTo(cx,cy); ctx.stroke(); ctx.beginPath(); ctx.arc(cx,cy,6,0,Math.PI*2); ctx.stroke(); prevX=cx; prevY=cy; } ctx.setLineDash([]); }
+function drawQueueForSelected(){
+  const u = units[selectedUnit];
+  if(!u || !u.commands.length) return;
+  const scaleInv = 1 / viewScale;
+  ctx.lineWidth = 2 * scaleInv;
+  ctx.strokeStyle = 'rgba(255,255,0,.9)';
+  ctx.setLineDash([4 * scaleInv, 4 * scaleInv]);
+  let prevX = u.x*TILE_SIZE + TILE_SIZE/2;
+  let prevY = u.y*TILE_SIZE + TILE_SIZE/2;
+  for(const c of u.commands){
+    const cx = c.tx*TILE_SIZE + TILE_SIZE/2;
+    const cy = c.ty*TILE_SIZE + TILE_SIZE/2;
+    ctx.beginPath();
+    ctx.moveTo(prevX,prevY);
+    ctx.lineTo(cx,cy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx,cy,6,0,Math.PI*2);
+    ctx.stroke();
+    prevX=cx;
+    prevY=cy;
+  }
+  ctx.setLineDash([]);
+}
 
 function drawUnits(){
   for(let i=0;i<units.length;i++){
@@ -943,7 +1071,11 @@ function drawUnits(){
       ctx.fillRect(px+4, cy-1, TILE_SIZE-8, 2);
       ctx.fillRect(cx-1, py+4, 2, TILE_SIZE-8);
     }
-    if(i===selectedUnit){ ctx.lineWidth=2; ctx.strokeStyle='#ffd700'; ctx.strokeRect(px+2,py+2,TILE_SIZE-4,TILE_SIZE-4); }
+    if(i===selectedUnit){
+      ctx.lineWidth = 2 / viewScale;
+      ctx.strokeStyle = '#ffd700';
+      ctx.strokeRect(px+2,py+2,TILE_SIZE-4,TILE_SIZE-4);
+    }
   }
 }
 
@@ -955,18 +1087,23 @@ function drawSunOverlay(){
   grad.addColorStop(0, `rgba(255,240,180,${alpha})`);
   grad.addColorStop(1, 'rgba(255,240,180,0)');
   ctx.fillStyle = grad;
-  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillRect(0,0,WORLD_W,WORLD_H);
 }
 
 function draw(){
+  ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  ctx.scale(viewScale, viewScale);
+  ctx.translate(-viewOffsetX, -viewOffsetY);
   drawTiles();
   const s = seasonFromMinutes(gameMinutes);
   ctx.fillStyle = ['rgba(80,200,120,0.05)','rgba(255,200,80,0.05)','rgba(255,140,0,0.05)','rgba(180,220,255,0.08)'][s.seasonIndex];
-  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillRect(0,0,WORLD_W,WORLD_H);
   drawSunOverlay();
   drawQueueForSelected();
   drawUnits();
+  ctx.restore();
   moneySpan.textContent = Math.floor(money).toString();
   renderUnitList();
 }
@@ -1173,8 +1310,8 @@ function fastForwardMinutes(minutes){
 }
 
 /* ===== Init ===== */
-function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; initMap(true); initUnits(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); refreshHud(); saveGame(); }
-function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); ensureOwnerTractor(); refreshHud(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; } last = performance.now(); requestAnimationFrame(loop); runTests(); }
+function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; clampView(); initMap(true); initUnits(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); refreshHud(); saveGame(); }
+function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); ensureOwnerTractor(); clampView(); refreshHud(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; } last = performance.now(); requestAnimationFrame(loop); runTests(); }
 
 runTestsBtn.addEventListener('click', runTests);
 start();
