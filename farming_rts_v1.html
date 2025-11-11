@@ -161,8 +161,8 @@ const CROP_STAGE = { NONE:-1, BARE:0, PLOWED:1, GROWING:2, READY:3 };
 
 const ACTION = { MOVE:'move', FIELD:'field', PLOW:'plow', SEED:'seed', SPRAY:'spray', HARVEST:'harvest', STONE:'stone', SNOW:'snow', AUTO:'auto' };
 
-const IDLE_TO_ROAD_MINUTES = 3 * 60;      // After 3 in-game hours, seek a road spot
-const IDLE_TO_SHELTER_MINUTES = 6 * 60;   // After 6 in-game hours, seek shelter
+const IDLE_TO_ROAD_MINUTES = 30;          // After 30 idle minutes, seek a road spot
+const IDLE_TO_SHELTER_MINUTES = 60;       // After 60 idle minutes on a road, seek a house
 
 // ===== Seasons =====
 const SEASONS = ['Spring','Summer','Autumn','Winter'];
@@ -427,6 +427,32 @@ function isOccupied(x,y, ignoreUnit){
   return false;
 }
 
+function restKindsMatch(a,b){
+  if(a===b) return true;
+  if(a==='house' && b==='shelter') return true;
+  if(a==='shelter' && b==='house') return true;
+  return false;
+}
+
+function isTileReserved(x,y, kind, ignoreUnit){
+  for(const other of units){
+    if(!other || other===ignoreUnit) continue;
+    const target = other.restTarget;
+    if(target && target.x===x && target.y===y){
+      if(!kind || !target.kind || restKindsMatch(kind, target.kind)) return true;
+    }
+    if(other.commands){
+      for(const cmd of other.commands){
+        if(cmd.meta==='rest' && cmd.tx===x && cmd.ty===y){
+          const restKind = cmd.restKind || null;
+          if(!kind || !restKind || restKindsMatch(kind, restKind)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 function stepOptions(u, tx, ty){
   const options = [];
   if(u.x<tx) options.push({x:u.x+1, y:u.y});
@@ -448,6 +474,8 @@ function tryStepTowards(u, tx, ty){
 
 function findNearestTileOfType(u, tileTypes, opts={}){
   const allowOccupied = opts.allowOccupied ?? false;
+  const avoidReserved = opts.avoidReserved ?? false;
+  const reserveKind = opts.reserveKind ?? null;
   let best = null;
   let bestDist = Infinity;
   for(let y=0;y<GRID_H;y++){
@@ -456,6 +484,7 @@ function findNearestTileOfType(u, tileTypes, opts={}){
       if(!allowOccupied && isOccupied(x,y,u)){
         if(!(u.x===x && u.y===y)) continue;
       }
+      if(avoidReserved && !(u.x===x && u.y===y) && isTileReserved(x,y, reserveKind, u)) continue;
       const dist = Math.abs(u.x-x) + Math.abs(u.y-y);
       if(dist < bestDist){ bestDist = dist; best = {x,y}; }
     }
@@ -463,12 +492,12 @@ function findNearestTileOfType(u, tileTypes, opts={}){
   return best;
 }
 
-function findNearestRoad(u){
-  return findNearestTileOfType(u, new Set([TileType.ROAD]));
+function findNearestRoad(u, opts={}){
+  return findNearestTileOfType(u, new Set([TileType.ROAD]), opts);
 }
 
-function findNearestShelter(u){
-  return findNearestTileOfType(u, new Set([TileType.HOUSE, TileType.SILO]));
+function findNearestHouse(u, opts={}){
+  return findNearestTileOfType(u, new Set([TileType.HOUSE]), opts);
 }
 
 function getTile(x,y){ return inBounds(x,y) ? tiles[y][x] : null; }
@@ -556,40 +585,49 @@ function maybeSendToRest(u){
   if(u.actionTimer>0) return;
   if(u.commands.some(c=>c.meta!=='rest')) return;
 
-  const shelterDue = u.idleMinutes >= IDLE_TO_SHELTER_MINUTES;
+  const hereTile = getTile(u.x, u.y);
+  if(hereTile===TileType.HOUSE){
+    u.restTarget = {x:u.x, y:u.y, kind:'house'};
+    return;
+  }
+
   const roadDue = u.idleMinutes >= IDLE_TO_ROAD_MINUTES;
   if(!roadDue) return;
 
-  if(shelterDue){
-    const shelter = findNearestShelter(u);
-    if(shelter){
-      if(u.restTarget && u.restTarget.kind==='shelter'){
-        if(u.x===u.restTarget.x && u.y===u.restTarget.y) return;
-        if(u.commands.some(c=>c.meta==='rest' && c.restKind==='shelter')) return;
-      }
-      removeRestCommands(u);
-      if(u.x===shelter.x && u.y===shelter.y){
-        u.restTarget = {x:shelter.x, y:shelter.y, kind:'shelter'};
+  const onRoad = hereTile===TileType.ROAD;
+  const houseDue = onRoad && u.idleMinutes >= IDLE_TO_SHELTER_MINUTES;
+
+  if(houseDue){
+    const targetHouse = findNearestHouse(u, {avoidReserved:true, reserveKind:'house'});
+    if(targetHouse){
+      if(u.x===targetHouse.x && u.y===targetHouse.y){
+        u.restTarget = {x:targetHouse.x, y:targetHouse.y, kind:'house'};
       } else {
-        enqueueCommand(u, {tx:shelter.x, ty:shelter.y, type:ACTION.MOVE, meta:'rest', restKind:'shelter'});
+        const alreadyHeading = u.commands.some(c=>c.meta==='rest' && restKindsMatch(c.restKind||null, 'house') && c.tx===targetHouse.x && c.ty===targetHouse.y);
+        if(!(alreadyHeading)){
+          removeRestCommands(u);
+          enqueueCommand(u, {tx:targetHouse.x, ty:targetHouse.y, type:ACTION.MOVE, meta:'rest', restKind:'house'});
+        }
       }
       return;
     }
   }
 
-  if(u.restTarget && (u.restTarget.kind==='road' || u.restTarget.kind==='shelter')) return;
-
-  const hereTile = getTile(u.x, u.y);
-  if(hereTile===TileType.ROAD){
+  if(onRoad){
     u.restTarget = {x:u.x, y:u.y, kind:'road'};
     return;
   }
-  const road = findNearestRoad(u);
+
+  const road = findNearestRoad(u, {avoidReserved:true, reserveKind:'road'});
   if(road){
     if(u.x===road.x && u.y===road.y){
       u.restTarget = {x:road.x, y:road.y, kind:'road'};
     } else {
-      enqueueCommand(u, {tx:road.x, ty:road.y, type:ACTION.MOVE, meta:'rest', restKind:'road'});
+      const alreadyHeading = u.commands.some(c=>c.meta==='rest' && restKindsMatch(c.restKind||null, 'road') && c.tx===road.x && c.ty===road.y);
+      if(!alreadyHeading){
+        removeRestCommands(u);
+        enqueueCommand(u, {tx:road.x, ty:road.y, type:ACTION.MOVE, meta:'rest', restKind:'road'});
+      }
     }
   }
 }
@@ -760,7 +798,11 @@ function renderUnitList(){
 }
 function iconFor(type){ if(type==='Tractor') return '🚜'; if(type==='Harvester') return '🧺'; if(type==='Sprayer') return '🧴'; return '🔧'; }
 function labelForCmd(c){
-  if(c.meta==='rest'){ const dest = c.restKind==='shelter' ? 'Shelter' : 'Road'; return `Rest to ${dest} → (${c.tx},${c.ty})`; }
+  if(c.meta==='rest'){
+    const kind = c.restKind || 'road';
+    const dest = restKindsMatch(kind, 'house') ? 'House' : 'Road';
+    return `Rest to ${dest} → (${c.tx},${c.ty})`;
+  }
   const nameMap = {auto:'Auto', move:'Move', field:'Field', plow:'Plow', seed:'Seed', spray:'Spray', harvest:'Harvest', stone:'Stone', snow:'Snow'};
   return `${nameMap[c.type]||c.type} → (${c.tx},${c.ty})`;
 }
