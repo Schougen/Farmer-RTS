@@ -329,6 +329,20 @@ function initMap(newGame=false){
 const UnitType = { TRACTOR:'Tractor', HARVESTER:'Harvester', SPRAYER:'Sprayer' };
 const units = []; let nextUnitId = 1; let selectedUnit = 0;
 
+let unitListDirty = false;
+function markUnitListDirty(){ unitListDirty = true; }
+function updateUnitState(u, newState){ if(u.state!==newState){ u.state = newState; markUnitListDirty(); } }
+function setRestTarget(u, target){
+  const prev = u.restTarget;
+  if(prev && target){
+    if(prev.x===target.x && prev.y===target.y && prev.kind===target.kind){ u.restTarget = target; return; }
+  }
+  if(!prev && !target) return;
+  u.restTarget = target ?? null;
+  markUnitListDirty();
+}
+function clearRestTarget(u){ if(u.restTarget){ u.restTarget = null; markUnitListDirty(); } else if(u.restTarget!==null){ u.restTarget = null; } }
+
 function createUnit(type,x,y,opts={}){
   return {
     id: nextUnitId++,
@@ -549,11 +563,11 @@ function sendUnitHome(u){
   if(!u || u.alwaysActive) return false;
   const hereTile = getTile(u.x, u.y);
   if(hereTile===TileType.HOUSE && !isOccupied(u.x, u.y, u)){
-    u.restTarget = {x:u.x, y:u.y, kind:'house'};
+    setRestTarget(u, {x:u.x, y:u.y, kind:'house'});
     return true;
   }
   removeRestCommands(u);
-  u.restTarget = null;
+  clearRestTarget(u);
   const preferredHouse = findNearestHouse(u, {avoidReserved:true, reserveKind:'house'});
   if(preferredHouse && !isOccupied(preferredHouse.x, preferredHouse.y, u)){
     enqueueCommand(u, {tx:preferredHouse.x, ty:preferredHouse.y, type:ACTION.MOVE, meta:'rest', restKind:'house'});
@@ -578,10 +592,10 @@ function handleShiftEnded(u){
     u.workX = null;
     u.workY = null;
   }
-  u.state = 'idle';
+  updateUnitState(u, 'idle');
   u.moveCooldown = 0;
-  u.commands.length = 0;
-  u.restTarget = null;
+  if(u.commands.length){ u.commands.length = 0; markUnitListDirty(); }
+  clearRestTarget(u);
   u.idleMinutes = Math.max(u.idleMinutes ?? 0, IDLE_TO_SHELTER_MINUTES);
   sendUnitHome(u);
 }
@@ -625,16 +639,16 @@ function tryStartWork(u, tx, ty, action){
   let chosen = action===ACTION.AUTO ? autoPickActionForTile(u, tx, ty) : action;
   if(!chosen) return false; if(!unitCanDo(u, chosen)) return false;
 
-  u.restTarget = null;
+  clearRestTarget(u);
 
   // Field creation
-  if(chosen===ACTION.FIELD){ if(tile!==TileType.GRASS) return false; if(money < FIELDIFY_COST) return false; u.action=ACTION.FIELD; u.actionTimer=FIELDIFY_TIME; u.workX=tx; u.workY=ty; u.state='working'; money-=FIELDIFY_COST; return true; }
+  if(chosen===ACTION.FIELD){ if(tile!==TileType.GRASS) return false; if(money < FIELDIFY_COST) return false; u.action=ACTION.FIELD; u.actionTimer=FIELDIFY_TIME; u.workX=tx; u.workY=ty; updateUnitState(u,'working'); money-=FIELDIFY_COST; return true; }
 
   // Stone picking (before seeding)
-  if(chosen===ACTION.STONE){ if(tile!==TileType.FIELD) return false; const st=getStage(tx,ty); if(!(st===CROP_STAGE.BARE || st===CROP_STAGE.PLOWED)) return false; if(getStone(tx,ty)) return false; u.action=ACTION.STONE; u.actionTimer=STONE_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
+  if(chosen===ACTION.STONE){ if(tile!==TileType.FIELD) return false; const st=getStage(tx,ty); if(!(st===CROP_STAGE.BARE || st===CROP_STAGE.PLOWED)) return false; if(getStone(tx,ty)) return false; u.action=ACTION.STONE; u.actionTimer=STONE_TIME; u.workX=tx; u.workY=ty; updateUnitState(u,'working'); return true; }
 
   // Snow plow (Winter)
-  if(chosen===ACTION.SNOW){ const s=seasonFromMinutes(gameMinutes); if(s.seasonIndex!==3) return false; if(!(tile===TileType.ROAD||tile===TileType.FIELD||tile===TileType.GRASS)) return false; if(!getSnow(tx,ty)) return false; u.action=ACTION.SNOW; u.actionTimer=SNOW_TIME; u.workX=tx; u.workY=ty; u.state='working'; return true; }
+  if(chosen===ACTION.SNOW){ const s=seasonFromMinutes(gameMinutes); if(s.seasonIndex!==3) return false; if(!(tile===TileType.ROAD||tile===TileType.FIELD||tile===TileType.GRASS)) return false; if(!getSnow(tx,ty)) return false; u.action=ACTION.SNOW; u.actionTimer=SNOW_TIME; u.workX=tx; u.workY=ty; updateUnitState(u,'working'); return true; }
 
   // Farm actions need a field
   if(tile!==TileType.FIELD) return false;
@@ -645,25 +659,34 @@ function tryStartWork(u, tx, ty, action){
   else if(chosen===ACTION.HARVEST && stage===CROP_STAGE.READY) dur=HARVEST_TIME;
   else return false;
 
-  u.action = chosen; u.actionTimer = dur; u.workX = tx; u.workY = ty; u.state='working';
+  u.action = chosen; u.actionTimer = dur; u.workX = tx; u.workY = ty; updateUnitState(u,'working');
   return true;
 }
 
 function enqueueCommand(u, cmd){
   if(!cmd) return;
   if(cmd.meta==='rest'){
-    u.restTarget = {x:cmd.tx, y:cmd.ty, kind:cmd.restKind || 'road'};
+    setRestTarget(u, {x:cmd.tx, y:cmd.ty, kind:cmd.restKind || 'road'});
   } else {
     removeRestCommands(u);
-    u.restTarget = null;
+    clearRestTarget(u);
     u.idleMinutes = 0;
   }
   u.commands.push(cmd);
+  markUnitListDirty();
 }
 
 function removeRestCommands(u){
-  if(!u || !u.commands) return;
-  for(let i=u.commands.length-1;i>=0;i--){ if(u.commands[i].meta==='rest') u.commands.splice(i,1); }
+  if(!u || !u.commands) return false;
+  let removed = false;
+  for(let i=u.commands.length-1;i>=0;i--){
+    if(u.commands[i].meta==='rest'){
+      u.commands.splice(i,1);
+      removed = true;
+    }
+  }
+  if(removed) markUnitListDirty();
+  return removed;
 }
 
 function maybeSendToRest(u){
@@ -673,7 +696,7 @@ function maybeSendToRest(u){
 
   const hereTile = getTile(u.x, u.y);
   if(hereTile===TileType.HOUSE){
-    u.restTarget = {x:u.x, y:u.y, kind:'house'};
+    setRestTarget(u, {x:u.x, y:u.y, kind:'house'});
     return;
   }
 
@@ -689,7 +712,7 @@ function maybeSendToRest(u){
     const targetHouse = findNearestHouse(u, {avoidReserved:true, reserveKind:'house'});
     if(targetHouse){
       if(u.x===targetHouse.x && u.y===targetHouse.y){
-        u.restTarget = {x:targetHouse.x, y:targetHouse.y, kind:'house'};
+        setRestTarget(u, {x:targetHouse.x, y:targetHouse.y, kind:'house'});
       } else {
         const alreadyHeading = u.commands.some(c=>c.meta==='rest' && restKindsMatch(c.restKind||null, 'house') && c.tx===targetHouse.x && c.ty===targetHouse.y);
         if(!(alreadyHeading)){
@@ -703,14 +726,14 @@ function maybeSendToRest(u){
 
   if(headingToHouse || targetingHouse) return;
   if(onRoad){
-    u.restTarget = {x:u.x, y:u.y, kind:'road'};
+    setRestTarget(u, {x:u.x, y:u.y, kind:'road'});
     return;
   }
 
   const road = findNearestRoad(u, {avoidReserved:true, reserveKind:'road'});
   if(road){
     if(u.x===road.x && u.y===road.y){
-      u.restTarget = {x:road.x, y:road.y, kind:'road'};
+      setRestTarget(u, {x:road.x, y:road.y, kind:'road'});
     } else {
       const alreadyHeading = u.commands.some(c=>c.meta==='rest' && restKindsMatch(c.restKind||null, 'road') && c.tx===road.x && c.ty===road.y);
       if(!alreadyHeading){
@@ -722,7 +745,7 @@ function maybeSendToRest(u){
 }
 
 function finishAction(u){
-  const x=u.workX, y=u.workY; if(!inBounds(x??-1,y??-1)){ u.action=null; u.state='idle'; return; }
+  const x=u.workX, y=u.workY; if(!inBounds(x??-1,y??-1)){ u.action=null; updateUnitState(u,'idle'); return; }
   const tile = getTile(x,y);
 
   if(u.action===ACTION.FIELD){ if(tile===TileType.GRASS){ tiles[y][x]=TileType.FIELD; crops[y][x]=CROP_STAGE.BARE; cropTimers[y][x]=0; readyTimers[y][x]=0; sprayed[y][x]=false; stonePicked[y][x]=false; } }
@@ -736,7 +759,7 @@ function finishAction(u){
     else if(u.action===ACTION.HARVEST && stage===CROP_STAGE.READY){ const s=seasonFromMinutes(gameMinutes); const valueBase = sprayed[y][x] ? BONUS_VALUE : BASE_VALUE; const stoneBonus = stonePicked[y][x] ? STONE_BONUS_MULT : 1.0; const penalty = winterHarvestPenalty(s.seasonIndex); const value = Math.round(valueBase * stoneBonus * penalty); money += value; crops[y][x]=CROP_STAGE.BARE; sprayed[y][x]=false; stonePicked[y][x]=false; cropTimers[y][x]=0; readyTimers[y][x]=0; }
   }
 
-  u.action=null; u.state='idle'; u.workX=null; u.workY=null;
+  u.action=null; updateUnitState(u,'idle'); u.workX=null; u.workY=null;
 }
 
 function updateUnits(dt){
@@ -766,7 +789,7 @@ function updateUnits(dt){
 
     const hasCommands = u.commands.length>0;
     const hasNonRestCommands = hasCommands ? u.commands.some(c=>c.meta!=='rest') : false;
-    if(hasNonRestCommands) u.restTarget = null;
+    if(hasNonRestCommands) clearRestTarget(u);
 
     if(hasCommands){
       const cmd = u.commands[0];
@@ -776,11 +799,13 @@ function updateUnits(dt){
       if(u.x===tx && u.y===ty){
         if(type===ACTION.MOVE){
           u.commands.shift();
-          if(!u.commands.length && u.state!=='idle') u.state='idle';
+          markUnitListDirty();
+          if(!u.commands.length) updateUnitState(u,'idle');
         } else {
           if(active){
             if(tryStartWork(u, tx, ty, type)){
               u.commands.shift();
+              markUnitListDirty();
               u.idleMinutes = 0;
               continue;
             }
@@ -792,11 +817,11 @@ function updateUnits(dt){
           const moved = tryStepTowards(u, tx, ty);
           if(moved){
             u.moveCooldown = MOVE_DELAY;
-            u.state='moving';
+            updateUnitState(u,'moving');
             if(cmd.meta!=='rest') u.idleMinutes = 0;
           } else {
             u.moveCooldown = MOVE_DELAY*0.5;
-            if(u.state!=='waiting') u.state='waiting';
+            updateUnitState(u,'waiting');
           }
         }
       }
@@ -808,11 +833,12 @@ function updateUnits(dt){
         maybeSendToRest(u);
       }
     } else {
-      if(u.state!=='idle') u.state='idle';
+      updateUnitState(u,'idle');
       u.idleMinutes += minuteDelta;
       maybeSendToRest(u);
     }
   }
+  if(unitListDirty) renderUnitList();
 }
 
 /* ===== Input ===== */
@@ -839,7 +865,7 @@ canvas.addEventListener('mousedown', (e)=>{
     for(let i=0;i<units.length;i++){
       if(units[i].x===tx && units[i].y===ty){ found=i; break; }
     }
-    if(found!==-1){ selectedUnit = found; }
+    if(found!==-1){ setSelectedUnit(found); }
     selectedTile = {x:tx, y:ty};
     renderTileInfo();
   }
@@ -849,7 +875,7 @@ canvas.addEventListener('mousedown', (e)=>{
       const u=units[selectedUnit];
       const append = e.shiftKey;
       const type = currentMode;
-      if(!append){ u.commands.length=0; u.restTarget=null; }
+      if(!append){ if(u.commands.length){ u.commands.length=0; markUnitListDirty(); } clearRestTarget(u); renderUnitList(); }
       if(inBounds(tx,ty)){
         enqueueCommand(u, {tx,ty,type});
         queueDrag = { unit:u, type, visited:new Set([`${tx},${ty}`]), last:{tx, ty} };
@@ -912,6 +938,7 @@ function endPan(){
 function endQueueDrag(){
   if(!queueDrag) return;
   queueDrag = null;
+  if(unitListDirty) renderUnitList();
   saveGame();
 }
 
@@ -960,7 +987,7 @@ sleepBtn.onclick = ()=>{
 };
 
 function addMoneySafe(v){ money += v; if(money<0) money=0; }
-function spawnAtHub(type){ const hub = getHubSpawn(); const u = createUnit(type, hub.x, hub.y); units.push(u); selectedUnit = units.length-1; }
+function spawnAtHub(type){ const hub = getHubSpawn(); const u = createUnit(type, hub.x, hub.y); units.push(u); setSelectedUnit(units.length-1); }
 
 buyTractorBtn.onclick = ()=>{ if(money>=COST.TRACTOR){ addMoneySafe(-COST.TRACTOR); spawnAtHub(UnitType.TRACTOR); saveGame(); } };
 buyHarvesterBtn.onclick = ()=>{ if(money>=COST.HARVESTER){ addMoneySafe(-COST.HARVESTER); spawnAtHub(UnitType.HARVESTER); saveGame(); } };
@@ -969,36 +996,159 @@ buySprayerBtn.onclick = ()=>{ if(money>=COST.SPRAYER){ addMoneySafe(-COST.SPRAYE
 modeBar.addEventListener('click', (e)=>{ const b = e.target.closest('button[data-mode]'); if(!b) return; for(const btn of modeBar.querySelectorAll('button')) btn.classList.remove('active'); b.classList.add('active'); currentMode = b.dataset.mode; });
 
 /* ===== Sidebar: Unit list ===== */
-function renderUnitList(){
-  // Clear old cards
-  unitListEl.querySelectorAll('.unitCard').forEach(n=>n.remove());
-  units.forEach((u,idx)=>{
-    const card = document.createElement('div');
-    card.className = 'unitCard'+(idx===selectedUnit?' selected':'');
-    card.innerHTML = `
-      <div class="unitHeader">
-        <div><strong>#${u.id}</strong> ${iconFor(u.type)} ${u.type} ${u.isOwner?'<span class="tag">Owner</span>':''}</div>
-        <span class="tag">${u.state}</span>
-      </div>
-      <div style="margin-top:4px;font-size:.86rem;color:#bbb;">Pos: (${u.x},${u.y})</div>
-      <div style="display:flex;gap:6px;margin-top:6px;">
-        <button class="tiny secondary" data-act="select">Select</button>
-        <button class="tiny secondary" data-act="clear">Clear queue</button>
-      </div>
-      <div style="margin-top:6px;font-size:.86rem;">Queue:</div>
-      <ol class="queueList">
-        ${u.commands.map(c=>`<li>${labelForCmd(c)}</li>`).join('') || '<li><em>empty</em></li>'}
-      </ol>
-    `;
-    card.addEventListener('click',(e)=>{
-      const btn = e.target.closest('button[data-act]');
-      if(btn){ const act = btn.dataset.act; if(act==='select'){ selectedUnit = idx; } else if(act==='clear'){ u.commands.length=0; u.restTarget=null; } }
-      else { selectedUnit = idx; }
-      renderTileInfo(); saveGame();
-    });
-    unitListEl.appendChild(card);
-  });
+function createUnitCard(){
+  const card = document.createElement('div');
+  card.className = 'unitCard';
+  const header = document.createElement('div');
+  header.className = 'unitHeader';
+  const title = document.createElement('div');
+  title.className = 'unitTitle';
+  const idEl = document.createElement('strong');
+  idEl.className = 'unitNumber';
+  title.appendChild(idEl);
+  const iconEl = document.createElement('span');
+  iconEl.className = 'unitIcon';
+  iconEl.style.marginLeft = '6px';
+  title.appendChild(iconEl);
+  const typeEl = document.createElement('span');
+  typeEl.className = 'unitType';
+  typeEl.style.marginLeft = '4px';
+  title.appendChild(typeEl);
+  const ownerTag = document.createElement('span');
+  ownerTag.className = 'tag ownerTag';
+  ownerTag.textContent = 'Owner';
+  ownerTag.style.marginLeft = '6px';
+  ownerTag.style.display = 'none';
+  title.appendChild(ownerTag);
+  header.appendChild(title);
+  const stateTag = document.createElement('span');
+  stateTag.className = 'tag stateTag';
+  header.appendChild(stateTag);
+  card.appendChild(header);
+
+  const posDiv = document.createElement('div');
+  posDiv.className = 'unitPos';
+  posDiv.style.marginTop = '4px';
+  posDiv.style.fontSize = '.86rem';
+  posDiv.style.color = '#bbb';
+  card.appendChild(posDiv);
+
+  const actions = document.createElement('div');
+  actions.className = 'unitActions';
+  actions.style.display = 'flex';
+  actions.style.gap = '6px';
+  actions.style.marginTop = '6px';
+  const selectBtn = document.createElement('button');
+  selectBtn.className = 'tiny secondary';
+  selectBtn.setAttribute('data-act','select');
+  selectBtn.textContent = 'Select';
+  actions.appendChild(selectBtn);
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'tiny secondary';
+  clearBtn.setAttribute('data-act','clear');
+  clearBtn.textContent = 'Clear queue';
+  actions.appendChild(clearBtn);
+  card.appendChild(actions);
+
+  const queueLabel = document.createElement('div');
+  queueLabel.className = 'queueLabel';
+  queueLabel.style.marginTop = '6px';
+  queueLabel.style.fontSize = '.86rem';
+  queueLabel.textContent = 'Queue:';
+  card.appendChild(queueLabel);
+
+  const queueList = document.createElement('ol');
+  queueList.className = 'queueList';
+  card.appendChild(queueList);
+
+  card._refs = { idEl, iconEl, typeEl, ownerTag, stateTag, posDiv, queueList };
+  return card;
 }
+
+function updateUnitCard(card, u, idx){
+  card.dataset.unitId = String(u.id);
+  card.classList.toggle('selected', idx===selectedUnit);
+  const refs = card._refs;
+  refs.idEl.textContent = `#${u.id}`;
+  refs.iconEl.textContent = iconFor(u.type);
+  refs.typeEl.textContent = u.type;
+  refs.ownerTag.style.display = u.isOwner ? '' : 'none';
+  refs.stateTag.textContent = u.state;
+  refs.posDiv.textContent = `Pos: (${u.x},${u.y})`;
+  const queueList = refs.queueList;
+  while(queueList.firstChild) queueList.removeChild(queueList.firstChild);
+  if(u.commands.length){
+    for(const c of u.commands){
+      const li = document.createElement('li');
+      li.textContent = labelForCmd(c);
+      queueList.appendChild(li);
+    }
+  } else {
+    const li = document.createElement('li');
+    const em = document.createElement('em');
+    em.textContent = 'empty';
+    li.appendChild(em);
+    queueList.appendChild(li);
+  }
+}
+
+function renderUnitList(){
+  const prevScroll = unitListEl.scrollTop;
+  const existing = new Map(Array.from(unitListEl.querySelectorAll('.unitCard')).map(el=>[Number(el.dataset.unitId), el]));
+  units.forEach((u, idx)=>{
+    let card = existing.get(u.id);
+    if(card){
+      existing.delete(u.id);
+    } else {
+      card = createUnitCard();
+      unitListEl.insertBefore(card, unitListEl.children[idx] || null);
+    }
+    updateUnitCard(card, u, idx);
+    const desiredNode = unitListEl.children[idx];
+    if(desiredNode !== card){ unitListEl.insertBefore(card, desiredNode || null); }
+  });
+  existing.forEach(card=>card.remove());
+  unitListEl.scrollTop = prevScroll;
+  unitListDirty = false;
+}
+
+function setSelectedUnit(idx){
+  if(idx<0 || idx>=units.length) return false;
+  if(selectedUnit===idx) return false;
+  selectedUnit = idx;
+  renderUnitList();
+  return true;
+}
+
+unitListEl.addEventListener('click', (e)=>{
+  const card = e.target.closest('.unitCard');
+  if(!card || !unitListEl.contains(card)) return;
+  const unitId = Number(card.dataset.unitId);
+  const idx = units.findIndex(u=>u.id===unitId);
+  if(idx===-1) return;
+  const btn = e.target.closest('button[data-act]');
+  if(btn){
+    const act = btn.dataset.act;
+    if(act==='select'){
+      setSelectedUnit(idx);
+      renderTileInfo();
+      saveGame();
+    } else if(act==='clear'){
+      const unit = units[idx];
+      if(unit){
+        if(unit.commands.length){ unit.commands.length = 0; markUnitListDirty(); }
+        clearRestTarget(unit);
+        renderUnitList();
+        renderTileInfo();
+        saveGame();
+      }
+    }
+    return;
+  }
+  setSelectedUnit(idx);
+  renderTileInfo();
+  saveGame();
+});
 function iconFor(type){ if(type==='Tractor') return '🚜'; if(type==='Harvester') return '🧺'; if(type==='Sprayer') return '🧴'; return '🔧'; }
 function labelForCmd(c){
   if(c.meta==='rest'){
@@ -1267,18 +1417,18 @@ function draw(){
   drawUnits();
   ctx.restore();
   moneySpan.textContent = Math.floor(money).toString();
-  renderUnitList();
 }
 
 /* ===== Persistence ===== */
 function saveGame(){ const save = { money, gameMinutes, tiles, crops, cropTimers, readyTimers, sprayed, units, nextUnitId, selectedUnit, snow, stonePicked, preset: presetSel.value, planScope: planScopeSel ? planScopeSel.value : 'all' }; try{ localStorage.setItem('farm_rts_save', JSON.stringify(save)); }catch(e){} }
 function ensureOwnerTractor(){
   let owner = units.find(u=>u.isOwner && u.type===UnitType.TRACTOR);
+  let changed = false;
   if(!owner){
     const firstTractor = units.find(u=>u.type===UnitType.TRACTOR);
     if(firstTractor){
-      firstTractor.isOwner = true;
-      firstTractor.alwaysActive = true;
+      if(!firstTractor.isOwner){ firstTractor.isOwner = true; changed = true; }
+      if(!firstTractor.alwaysActive){ firstTractor.alwaysActive = true; }
       owner = firstTractor;
     }
   }
@@ -1286,7 +1436,9 @@ function ensureOwnerTractor(){
     const hub = getHubSpawn();
     const replacement = createUnit(UnitType.TRACTOR, hub.x, hub.y, {isOwner:true, alwaysActive:true});
     units.unshift(replacement);
+    changed = true;
   }
+  if(changed){ markUnitListDirty(); renderUnitList(); }
 }
   function loadGame(){ const raw = localStorage.getItem('farm_rts_save'); if(!raw) return false; try{ const s = JSON.parse(raw); money = s.money ?? money; gameMinutes = s.gameMinutes ?? gameMinutes; tiles=s.tiles||tiles; crops=s.crops||crops; cropTimers=s.cropTimers||cropTimers; readyTimers=s.readyTimers||readyTimers; sprayed=s.sprayed||sprayed; snow=s.snow||snow; stonePicked=s.stonePicked||stonePicked; units.length=0; (s.units||[]).forEach(u=>{ u.commands = u.commands || []; u.isOwner = !!u.isOwner; u.alwaysActive = !!u.alwaysActive; u.idleMinutes = u.idleMinutes ?? 0; u.restTarget = null; u.lastShiftState = u.alwaysActive ? true : withinShift(); units.push(u); }); nextUnitId = s.nextUnitId ?? 1; selectedUnit = Math.min(s.selectedUnit ?? 0, Math.max(0, units.length-1)); if(s.preset) presetSel.value=s.preset; if(s.planScope && planScopeSel) planScopeSel.value = s.planScope; ensureOwnerTractor(); ensureGridDims(); return true; }catch(e){ return false; } }
 
@@ -1403,7 +1555,7 @@ function planCycle(){ if(!ASSISTED) return;
   const caps = capacityNumbers();
 
   if(planPlow || planSeed || planSnow || planStone){
-    tractors.forEach(t=>{ t.commands.length=0; t.restTarget=null; });
+    tractors.forEach(t=>{ if(t.commands.length){ t.commands.length=0; markUnitListDirty(); } clearRestTarget(t); });
     if(planSnow){
       const snowRoads = listTilesWhere((x,y)=> tiles[y][x]===TileType.ROAD && getSnow(x,y)).map(p=>({...p, priority:0}));
       const snowFields = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && getSnow(x,y)).map(p=>({...p, priority:1}));
@@ -1426,17 +1578,18 @@ function planCycle(){ if(!ASSISTED) return;
   }
 
   if(planSpray){
-    sprayers.forEach(s=>{ s.commands.length=0; s.restTarget=null; });
+    sprayers.forEach(s=>{ if(s.commands.length){ s.commands.length=0; markUnitListDirty(); } clearRestTarget(s); });
     const growWindow = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.GROWING && ((()=>{const gp=growthProgress(x,y); return gp>=SPRAY_BEST_FROM && gp<=SPRAY_BEST_TO;})()));
     assignUniqueTasks(sprayers, growWindow, caps.perDaySpray, ACTION.SPRAY);
   }
 
   if(planHarvest){
-    harvesters.forEach(h=>{ h.commands.length=0; h.restTarget=null; });
+    harvesters.forEach(h=>{ if(h.commands.length){ h.commands.length=0; markUnitListDirty(); } clearRestTarget(h); });
     const ready = listTilesWhere((x,y)=> tiles[y][x]===TileType.FIELD && crops[y][x]===CROP_STAGE.READY);
     assignUniqueTasks(harvesters, ready, caps.perDayHarvest, ACTION.HARVEST);
   }
 
+  renderUnitList();
   saveGame();
 }
 planBtn.addEventListener('click', planCycle);
@@ -1472,8 +1625,8 @@ function fastForwardMinutes(minutes){
 }
 
 /* ===== Init ===== */
-function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; clampView(); initMap(true); initUnits(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); refreshHud(); saveGame(); }
-function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); ensureOwnerTractor(); clampView(); refreshHud(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; } last = performance.now(); requestAnimationFrame(loop); runTests(); }
+function startNewGame(){ money = 7000; gameMinutes = 8*60; paused=false; timeScale=1; viewScale = 1; viewOffsetX = 0; viewOffsetY = 0; clampView(); initMap(true); initUnits(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; selectedTile = getHubSpawn(); applyPreset(); renderTileInfo(); refreshHud(); renderUnitList(); saveGame(); }
+function start(){ const loaded = loadGame(); if(!loaded){ startNewGame(); } else { ensureGridDims(); applyPreset(); ensureOwnerTractor(); clampView(); refreshHud(); lastSeasonIndex = seasonFromMinutes(gameMinutes).seasonIndex; renderUnitList(); } last = performance.now(); requestAnimationFrame(loop); runTests(); }
 
 runTestsBtn.addEventListener('click', runTests);
 window.addEventListener('resize', ()=>{ requestAnimationFrame(resizeCanvasViewport); });
