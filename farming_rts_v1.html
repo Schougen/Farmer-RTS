@@ -459,7 +459,8 @@ function createUnit(type,x,y,opts={}){
     cargo:0,
     cargoKind:null,
     capacity: capacityFor(type),
-    lastShiftState: opts.alwaysActive ? true : withinShift()
+    lastShiftState: opts.alwaysActive ? true : withinShift(),
+    hitchedTo: null
   };
 }
 function initUnits(){
@@ -553,6 +554,23 @@ function isOccupied(x,y, ignoreUnit){
     if(other.x===x && other.y===y) return true;
   }
   return false;
+}
+
+function findAdjacentTractor(u){
+  if(!u) return null;
+  for(const other of units){
+    if(!other || other.type!==UnitType.TRACTOR) continue;
+    const dist = Math.abs(other.x - u.x) + Math.abs(other.y - u.y);
+    if(dist===1) return other;
+  }
+  return null;
+}
+
+function unitHasTowPower(u){
+  if(!u || u.type!==UnitType.WAGON) return true;
+  const tractor = findAdjacentTractor(u);
+  u.hitchedTo = tractor ? tractor.id : null;
+  return !!tractor;
 }
 
 function restKindsMatch(a,b){
@@ -1137,7 +1155,7 @@ function updateUnits(dt){
     if (hasCommands) {
       const cmd = u.commands[0];
       const { tx, ty, type } = cmd;
-      const canMove = active || cmd.meta === 'rest';
+      const canMove = (active || cmd.meta === 'rest') && unitHasTowPower(u);
 
       if (u.x === tx && u.y === ty) {
         if (type === ACTION.MOVE) {
@@ -1207,6 +1225,8 @@ function updateUnits(dt){
             updateUnitState(u, 'waiting');
           }
         }
+      } else {
+        updateUnitState(u, 'waiting');
       }
 
       if (hasNonRestCommands) {
@@ -1799,6 +1819,45 @@ function drawUnits(){
       // booms
       ctx.fillRect(px+4, cy-1, TILE_SIZE-8, 2);
       ctx.fillRect(cx-1, py+4, 2, TILE_SIZE-8);
+    } else if(u.type===UnitType.WAGON){
+      // Tractor wagon: box body with small wheels
+      ctx.fillStyle = u.state==='working' ? '#f0c565' : '#d8a53c';
+      ctx.fillRect(px+4, py+6, TILE_SIZE-8, TILE_SIZE-12);
+      ctx.fillStyle = '#2d2d2d';
+      ctx.beginPath(); ctx.arc(px+8, py+TILE_SIZE-6, 4, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px+TILE_SIZE-8, py+TILE_SIZE-6, 4, 0, Math.PI*2); ctx.fill();
+      if(u.hitchedTo){
+        const tractor = units.find(o=>o && o.id===u.hitchedTo);
+        if(tractor){
+          ctx.strokeStyle = '#ffd24a';
+          ctx.lineWidth = 2 / viewScale;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(tractor.x*TILE_SIZE + TILE_SIZE/2, tractor.y*TILE_SIZE + TILE_SIZE/2);
+          ctx.stroke();
+        }
+      }
+    } else if(u.type===UnitType.SEMI){
+      // Semi-truck: extended trailer + cab (approx two tiles long)
+      const trailerX = px;
+      const trailerY = py + 6;
+      const trailerW = TILE_SIZE * 2 - 8;
+      const trailerH = TILE_SIZE - 12;
+      ctx.fillStyle = '#b6bcc4';
+      ctx.fillRect(trailerX, trailerY, trailerW, trailerH);
+
+      // Cab at the front-right
+      ctx.fillStyle = '#dfe5ec';
+      ctx.fillRect(px+TILE_SIZE-4, py+4, TILE_SIZE-6, TILE_SIZE-10);
+      ctx.fillStyle = '#2f6cd8';
+      ctx.fillRect(px+TILE_SIZE+4, py+8, TILE_SIZE-14, TILE_SIZE-18);
+
+      // Wheels
+      ctx.fillStyle = '#2d2d2d';
+      const wheelY = py + TILE_SIZE - 6;
+      ctx.beginPath(); ctx.arc(px+10, wheelY, 4.5, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px+TILE_SIZE+4, wheelY, 4.5, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px+TILE_SIZE*2-12, wheelY, 4.5, 0, Math.PI*2); ctx.fill();
     }
     if(i===selectedUnit){
       ctx.lineWidth = 2 / viewScale;
