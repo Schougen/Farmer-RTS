@@ -12,10 +12,12 @@ Wagons that can be drawn by a tractor can be used for:
 Will have tanks that fills when harvesting. When the tank is full the harvester stops and needs to be emptied before it can continue.
 -Can empty tank to: wagons/semi-truck/silo/sellpoint
 
-### 1.3 Sellingpoint
-for harvest, where you either by wagon or semi move the grain to the "grain elevator" to sell your harvest
--Future for selling crops. Store the harvest until the price is right to maximize your profits.
+### 1.3 silos and Sellingpoint
+for harvest, where you either by wagon or semitruck move the grain to the silo for storage (and get extra bonous when later selling at the grain elevator due to the grain beeing dry etc).
+The "grain elevator" is where you sell your harvest for profit, if you sell dried (grain that has been stored for the required ammount of time in a silo) grain you get the best price but newly harvested crop can be sold for a negative hit in income.
 -Will be some distance from the starting square
+
+-in future updates storing the harvest until the price is right to maximize your profits.
 
 ### 1.4 Semi-trucks
 Have big capasity and can be used as field storage and moving back and forth when harvest.
