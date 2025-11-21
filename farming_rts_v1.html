@@ -388,7 +388,7 @@ function initMap(newGame=false){
     for(let x=0;x<GRID_W;x++){
       const row = baseRows[y] || '';
       const ch  = row[x] || 'g';   // 'g' = grass
-      let t = TileType.GRASS; if(ch==='r') t=TileType.ROAD; else if(ch==='S') t=TileType.SILO; else if(ch==='H') t=TileType.HOUSE;
+      let t = TileType.GRASS; if(ch==='r') t=TileType.ROAD; else if(ch==='S') t=TileType.SILO; else if(ch==='H') t=TileType.HOUSE; else if (ch === 'E') t = TileType.ELEVATOR;
       tiles[y][x]=t; crops[y][x]=CROP_STAGE.NONE; cropTimers[y][x]=0; readyTimers[y][x]=0; sprayed[y][x]=false; stonePicked[y][x]=false; snow[y][x]=false;
     }
   }
