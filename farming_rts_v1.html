@@ -6,7 +6,7 @@
 <style>
   :root { --bg:#111; --panel:#1b1b1b; --panel2:#222; --line:#333; --accent:#2f7dd8; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:#eee; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif; display:grid; grid-template-columns: 300px 1fr; grid-template-rows:auto auto 1fr; gap:8px; min-height:100vh; }
+  body { margin:0; background:var(--bg); color:#eee; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif; display:grid; grid-template-columns: 300px 1fr; grid-template-rows:auto auto 1fr; gap:8px; min-height:100vh; height:100vh; }
   header { grid-column:1 / -1; padding:10px 12px; }
   h1 { margin:0; font-size:1.15rem; letter-spacing:.04em; text-transform:uppercase; }
   #hud { grid-column:2 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:0 12px 6px; }
@@ -18,8 +18,8 @@
   button.tiny { padding:4px 8px; font-size:.78rem; }
   button.active { outline:2px solid #ffd700; }
   button:disabled { background:#555; cursor:default; }
-  aside#sidebar { grid-row:2 / -1; grid-column:1; background:var(--panel); border-right:1px solid #3a3a3a; padding:10px; overflow:auto; }
-  #tileInfo, #unitList, #debug { background:var(--panel2); border:1px solid #3a3a3a; border-radius:10px; padding:10px; margin-bottom:10px; }
+  aside#sidebar { grid-row:2 / -1; grid-column:1; background:var(--panel); border-right:1px solid #3a3a3a; padding:10px; overflow:hidden; display:flex; flex-direction:column; gap:10px; }
+  #tileInfo, #unitList, #debug { background:var(--panel2); border:1px solid #3a3a3a; border-radius:10px; padding:10px; margin-bottom:0; }
   #tileInfo h2, #unitList h2, #debug h2 { margin:4px 0 8px; font-size:1rem; }
   .kv { display:grid; grid-template-columns: auto 1fr; gap:4px 8px; font-size:.92rem; }
   .kv span:nth-child(odd){ color:#bbb; }
@@ -27,6 +27,8 @@
   .unitHeader { display:flex; justify-content:space-between; align-items:center; }
   .tag { font-size:.75rem; padding:2px 6px; border-radius:8px; background:#444; }
   .unitCard.selected { outline:2px solid #ffd700; }
+  #unitList { flex:1; overflow:auto; margin-bottom:0; }
+  #unitList h2 { position:sticky; top:0; background:linear-gradient(180deg, rgba(27,27,27,0.95), rgba(27,27,27,0.85)); padding-top:0; padding-bottom:6px; z-index:1; }
   .queueList { margin:6px 0 0; padding-left:16px; font-size:.85rem; color:#ddd; max-height:160px; overflow:auto; padding-right:6px; }
   #boardWrap { grid-column:2; grid-row:3; display:flex; justify-content:center; align-items:center; padding:8px 12px 16px; }
   #gameContainer { background:#000; padding:10px; border-radius:16px; box-shadow:0 0 20px rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; }
@@ -901,23 +903,25 @@ function finishAction(u){
 }
 
 function updateUnits(dt){
-  const simDt = dt*timeScale;
+  const simDt = dt * timeScale;
   const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
   const minuteDelta = simDt * minutesPerRealSecond;
-  for(const u of units){
-    if(u.idleMinutes===undefined) u.idleMinutes=0;
-    if(u.restTarget===undefined) u.restTarget=null;
+
+  for (const u of units) {
+    if (u.idleMinutes === undefined) u.idleMinutes = 0;
+    if (u.restTarget === undefined) u.restTarget = null;
+
     const active = unitIsOnShift(u);
-    if(u.lastShiftState===undefined) u.lastShiftState = active;
-    if(!active && u.lastShiftState){
+    if (u.lastShiftState === undefined) u.lastShiftState = active;
+    if (!active && u.lastShiftState) {
       handleShiftEnded(u);
     }
     u.lastShiftState = active;
 
-    if(u.actionTimer>0){
-      if(active){
+    if (u.actionTimer > 0) {
+      if (active) {
         u.actionTimer -= simDt;
-        if(u.actionTimer<=0){
+        if (u.actionTimer <= 0) {
           finishAction(u);
           u.idleMinutes = 0;
         }
@@ -925,77 +929,86 @@ function updateUnits(dt){
       continue;
     }
 
-    const hasCommands = u.commands.length>0;
-    const hasNonRestCommands = hasCommands ? u.commands.some(c=>c.meta!=='rest') : false;
-    if(hasNonRestCommands) clearRestTarget(u);
+    const hasCommands = u.commands.length > 0;
+    const hasNonRestCommands = hasCommands ? u.commands.some(c => c.meta !== 'rest') : false;
+    if (hasNonRestCommands) clearRestTarget(u);
 
-    if(hasCommands){
+    if (hasCommands) {
       const cmd = u.commands[0];
-      const {tx, ty, type} = cmd;
-      const canMove = active || cmd.meta==='rest';
+      const { tx, ty, type } = cmd;
+      const canMove = active || cmd.meta === 'rest';
 
-       if (u.x === tx && u.y === ty) {
-    if (type === ACTION.MOVE) {
-      // Reached MOVE target → pop command
-      u.commands.shift();
-      markUnitListDirty();
+      if (u.x === tx && u.y === ty) {
+        if (type === ACTION.MOVE) {
+          // Reached MOVE target → pop command
+          u.commands.shift();
+          markUnitListDirty();
 
-      // If queue is now empty, unit is idle
-      if (!u.commands.length) {
-        updateUnitState(u, 'idle');
-      }
+          // If queue is now empty, unit is idle
+          if (!u.commands.length) {
+            updateUnitState(u, 'idle');
+          }
 
-      // First command changed → path is now stale
-      clearUnitPath(u);
-    } else {
-      // At work tile: try to start the action (only during shift)
-      if (active && tryStartWork(u, tx, ty, type)) {
-        u.commands.shift();
-        markUnitListDirty();
-        clearUnitPath(u);
-        u.idleMinutes = 0;
-        continue; // go to next unit
-            }
+          // First command changed → path is now stale
+          clearUnitPath(u);
+        } else {
+          // At work tile: try to start the action (only during shift)
+          if (active && tryStartWork(u, tx, ty, type)) {
+            u.commands.shift();
+            markUnitListDirty();
+            clearUnitPath(u);
+            u.idleMinutes = 0;
+            continue; // go to next unit
+          }
+
+          // Not working yet: if off-shift, wait; otherwise drop impossible work
+          if (!active) {
+            updateUnitState(u, 'waiting');
+          } else {
+            u.commands.shift();
+            markUnitListDirty();
+            clearUnitPath(u);
+            updateUnitState(u, 'idle');
           }
         }
-      } else if(canMove){
+      } else if (canMove) {
         u.moveCooldown -= simDt;
-        if(u.moveCooldown<=0){
+        if (u.moveCooldown <= 0) {
           let moved = false;
           let path = ensureUnitPath(u, tx, ty);
-          if(Array.isArray(path)){
-            if(path.length){
+          if (Array.isArray(path)) {
+            if (path.length) {
               let next = path[0];
-              if(isOccupied(next.x, next.y, u)){
+              if (isOccupied(next.x, next.y, u)) {
                 u.path = computePath(u, tx, ty);
                 path = u.path;
-                if(Array.isArray(path) && path.length){
+                if (Array.isArray(path) && path.length) {
                   next = path[0];
                 }
               }
-              if(Array.isArray(path) && path.length && !isOccupied(path[0].x, path[0].y, u)){
+              if (Array.isArray(path) && path.length && !isOccupied(path[0].x, path[0].y, u)) {
                 const step = path.shift();
                 u.x = step.x;
                 u.y = step.y;
                 moved = true;
               }
-            } else if(u.x!==tx || u.y!==ty){
+            } else if (u.x !== tx || u.y !== ty) {
               u.path = computePath(u, tx, ty);
             }
           }
 
-          if(moved){
+          if (moved) {
             u.moveCooldown = MOVE_DELAY;
-            updateUnitState(u,'moving');
-            if(cmd.meta!=='rest') u.idleMinutes = 0;
+            updateUnitState(u, 'moving');
+            if (cmd.meta !== 'rest') u.idleMinutes = 0;
           } else {
-            u.moveCooldown = MOVE_DELAY*0.5;
-            updateUnitState(u,'waiting');
+            u.moveCooldown = MOVE_DELAY * 0.5;
+            updateUnitState(u, 'waiting');
           }
         }
       }
 
-      if(hasNonRestCommands){
+      if (hasNonRestCommands) {
         u.idleMinutes = 0;
       } else {
         u.idleMinutes += minuteDelta;
@@ -1006,9 +1019,10 @@ function updateUnits(dt){
       clearUnitPath(u);
       u.idleMinutes += minuteDelta;
       maybeSendToRest(u);
+    }
   }
-  }
-if (unitListDirty) renderUnitList();
+
+  if (unitListDirty) renderUnitList();
 }
 
 /* ===== Input ===== */
