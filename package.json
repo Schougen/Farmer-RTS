@@ -1,0 +1,16 @@
+{
+  "name": "farmer-rts",
+  "version": "1.0.0",
+  "description": "Harvest logistics loop with drying silos, wagons, and semis.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node scripts/run-tests.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
