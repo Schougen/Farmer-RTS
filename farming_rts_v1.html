@@ -566,8 +566,13 @@ function findAdjacentTractor(u){
   return null;
 }
 
-function unitHasTowPower(u){
+function unitHasTowPower(u, towStatus){
   if(!u || u.type!==UnitType.WAGON) return true;
+  const cached = towStatus ? towStatus.get(u.id) : null;
+  if(cached){
+    u.hitchedTo = cached.hitchedTo;
+    return cached.canTow;
+  }
   const tractor = findAdjacentTractor(u);
   if(!tractor){ u.hitchedTo=null; return false; }
   u.hitchedTo = tractor.id;
@@ -1128,6 +1133,13 @@ function updateUnits(dt){
   const minutesPerRealSecond = MINUTES_PER_DAY / REAL_SECONDS_PER_INGAME_DAY;
   const minuteDelta = simDt * minutesPerRealSecond;
 
+  const towStatus = new Map();
+  for(const u of units){
+    if(!u || u.type!==UnitType.WAGON) continue;
+    const tractor = findAdjacentTractor(u);
+    towStatus.set(u.id, { canTow: !!tractor, hitchedTo: tractor ? tractor.id : null });
+  }
+
   for (const u of units) {
     if (u.idleMinutes === undefined) u.idleMinutes = 0;
     if (u.restTarget === undefined) u.restTarget = null;
@@ -1158,7 +1170,7 @@ function updateUnits(dt){
     if (hasCommands) {
       const cmd = u.commands[0];
       const { tx, ty, type } = cmd;
-      const canMove = (active || cmd.meta === 'rest') && unitHasTowPower(u);
+      const canMove = (active || cmd.meta === 'rest') && unitHasTowPower(u, towStatus);
 
       if (u.x === tx && u.y === ty) {
         if (type === ACTION.MOVE) {
