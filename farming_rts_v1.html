@@ -569,8 +569,11 @@ function findAdjacentTractor(u){
 function unitHasTowPower(u){
   if(!u || u.type!==UnitType.WAGON) return true;
   const tractor = findAdjacentTractor(u);
-  u.hitchedTo = tractor ? tractor.id : null;
-  return !!tractor;
+  if(!tractor || tractor.actionTimer>0) { u.hitchedTo=null; return false; }
+  const tractorBusy = tractor.commands && tractor.commands.some(c=>c.meta!=='rest');
+  if(tractorBusy) { u.hitchedTo=null; return false; }
+  u.hitchedTo = tractor.id;
+  return true;
 }
 
 function restKindsMatch(a,b){
@@ -1095,7 +1098,7 @@ function finishAction(u){
     } else {
       const donor = units.find(o=>o && o.x===x && o.y===y && o.id===u.loadTargetId);
       if(donor){
-        const pulled = Math.min(donor.cargo, u.capacity - u.cargo, GRAIN_PER_TILE*2);
+        const pulled = Math.min(donor.cargo, u.capacity - u.cargo);
         donor.cargo -= pulled; u.cargo += pulled; u.cargoKind='fresh';
       }
     }
@@ -1206,10 +1209,24 @@ function updateUnits(dt){
                 }
               }
               if (Array.isArray(path) && path.length && !isOccupied(path[0].x, path[0].y, u)) {
-                const step = path.shift();
-                u.x = step.x;
-                u.y = step.y;
-                moved = true;
+                if (u.type === UnitType.WAGON) {
+                  const tractor = units.find(o=>o && o.id===u.hitchedTo);
+                  const tractorCanPull = tractor && tractor.moveCooldown<=0 && tractor.actionTimer<=0 && (!tractor.commands || !tractor.commands.some(c=>c.meta!=='rest'));
+                  const step = path[0];
+                  const tractorDest = {x:u.x, y:u.y};
+                  const tractorAdj = tractorCanPull && Math.abs(tractor.x-tractorDest.x)+Math.abs(tractor.y-tractorDest.y)===1;
+                  if(tractorAdj && !isOccupied(step.x, step.y, u) && !isOccupied(tractorDest.x, tractorDest.y, tractor)){
+                    path.shift();
+                    u.x = step.x; u.y = step.y; moved = true;
+                    tractor.x = tractorDest.x; tractor.y = tractorDest.y; tractor.moveCooldown = MOVE_DELAY; tractor.idleMinutes = 0;
+                    updateUnitState(tractor, 'moving');
+                  }
+                } else {
+                  const step = path.shift();
+                  u.x = step.x;
+                  u.y = step.y;
+                  moved = true;
+                }
               }
             } else if (u.x !== tx || u.y !== ty) {
               u.path = computePath(u, tx, ty);
@@ -1583,7 +1600,7 @@ unitListEl.addEventListener('click', (e)=>{
   renderTileInfo();
   saveGame();
 });
-function iconFor(type){ if(type==='Tractor') return '🚜'; if(type==='Harvester') return '🧺'; if(type==='Sprayer') return '🧴'; if(type==='Tractor Wagon') return '🛒'; if(type==='Semi-truck') return '🚚'; return '🔧'; }
+function iconFor(type){ if(type==='Tractor') return '🚜'; if(type==='Harvester') return '🧺'; if(type==='Sprayer') return '🧴'; if(type==='Tractor Wagon') return '🛻'; if(type==='Semi-truck') return '🚛'; return '🔧'; }
 function labelForCmd(c){
   if(c.meta==='rest'){
     const kind = c.restKind || 'road';
@@ -1821,8 +1838,11 @@ function drawUnits(){
       ctx.fillRect(cx-1, py+4, 2, TILE_SIZE-8);
     } else if(u.type===UnitType.WAGON){
       // Tractor wagon: box body with small wheels
-      ctx.fillStyle = u.state==='working' ? '#f0c565' : '#d8a53c';
+      ctx.fillStyle = u.state==='working' ? '#f3c86c' : '#e2af43';
+      ctx.strokeStyle = '#2b1d04';
+      ctx.lineWidth = 2 / viewScale;
       ctx.fillRect(px+4, py+6, TILE_SIZE-8, TILE_SIZE-12);
+      ctx.strokeRect(px+4, py+6, TILE_SIZE-8, TILE_SIZE-12);
       ctx.fillStyle = '#2d2d2d';
       ctx.beginPath(); ctx.arc(px+8, py+TILE_SIZE-6, 4, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(px+TILE_SIZE-8, py+TILE_SIZE-6, 4, 0, Math.PI*2); ctx.fill();
@@ -1843,17 +1863,21 @@ function drawUnits(){
       const trailerY = py + 6;
       const trailerW = TILE_SIZE * 2 - 8;
       const trailerH = TILE_SIZE - 12;
-      ctx.fillStyle = '#b6bcc4';
+      ctx.fillStyle = u.state==='working' ? '#d9e4f5' : '#c4cedd';
+      ctx.strokeStyle = '#1c2c48';
+      ctx.lineWidth = 2 / viewScale;
       ctx.fillRect(trailerX, trailerY, trailerW, trailerH);
+      ctx.strokeRect(trailerX, trailerY, trailerW, trailerH);
 
       // Cab at the front-right
-      ctx.fillStyle = '#dfe5ec';
+      ctx.fillStyle = '#eef4ff';
       ctx.fillRect(px+TILE_SIZE-4, py+4, TILE_SIZE-6, TILE_SIZE-10);
       ctx.fillStyle = '#2f6cd8';
       ctx.fillRect(px+TILE_SIZE+4, py+8, TILE_SIZE-14, TILE_SIZE-18);
+      ctx.strokeRect(px+TILE_SIZE+4, py+8, TILE_SIZE-14, TILE_SIZE-18);
 
       // Wheels
-      ctx.fillStyle = '#2d2d2d';
+      ctx.fillStyle = '#1f1f1f';
       const wheelY = py + TILE_SIZE - 6;
       ctx.beginPath(); ctx.arc(px+10, wheelY, 4.5, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(px+TILE_SIZE+4, wheelY, 4.5, 0, Math.PI*2); ctx.fill();
