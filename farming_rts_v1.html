@@ -569,10 +569,9 @@ function findAdjacentTractor(u){
 function unitHasTowPower(u){
   if(!u || u.type!==UnitType.WAGON) return true;
   const tractor = findAdjacentTractor(u);
-  if(!tractor || tractor.actionTimer>0) { u.hitchedTo=null; return false; }
-  const tractorBusy = tractor.commands && tractor.commands.some(c=>c.meta!=='rest');
-  if(tractorBusy) { u.hitchedTo=null; return false; }
+  if(!tractor){ u.hitchedTo=null; return false; }
   u.hitchedTo = tractor.id;
+  if(tractor.actionTimer>0) return false;
   return true;
 }
 
@@ -1132,6 +1131,7 @@ function updateUnits(dt){
   for (const u of units) {
     if (u.idleMinutes === undefined) u.idleMinutes = 0;
     if (u.restTarget === undefined) u.restTarget = null;
+    if (u.type === UnitType.WAGON) unitHasTowPower(u);
 
     const active = unitIsOnShift(u);
     if (u.lastShiftState === undefined) u.lastShiftState = active;
@@ -1223,9 +1223,26 @@ function updateUnits(dt){
                   }
                 } else {
                   const step = path.shift();
+                  const prevX = u.x;
+                  const prevY = u.y;
                   u.x = step.x;
                   u.y = step.y;
                   moved = true;
+
+                  // If a wagon is hitched to this tractor and idle, drag it along.
+                  if (u.type === UnitType.TRACTOR) {
+                    const wagon = units.find(w => w && w.type === UnitType.WAGON && w.hitchedTo === u.id && Math.abs(w.x - prevX) + Math.abs(w.y - prevY) === 1);
+                    const wagonFree = wagon && !wagon.actionTimer && wagon.moveCooldown <= 0 && !isOccupied(prevX, prevY, wagon);
+                    const wagonIdleQueue = wagon && (!wagon.commands.length || wagon.commands.every(c => c.meta === 'rest'));
+                    if (wagon && wagonFree && wagonIdleQueue) {
+                      clearUnitPath(wagon);
+                      wagon.x = prevX;
+                      wagon.y = prevY;
+                      wagon.moveCooldown = MOVE_DELAY;
+                      wagon.idleMinutes = 0;
+                      updateUnitState(wagon, 'moving');
+                    }
+                  }
                 }
               }
             } else if (u.x !== tx || u.y !== ty) {
